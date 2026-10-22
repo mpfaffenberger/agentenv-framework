@@ -6,6 +6,7 @@ import click
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
 from agent_env.cli.utils import build_platform_option, detect_env_metadata, refuse_unwritable_ids
+from agent_env.env.published_images import AGENT_IMAGES, PublishedImage, published_digest
 from agent_env.store.ids import derive_id, image_repository
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 
@@ -17,6 +18,10 @@ from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 @click.option("--image-ref", "image_ref", default=None,
               help="An image already in a registry, e.g. ghcr.io/org/agent:v1: registered as it is, with its tag pinned "
                    "to the digest the registry serves now, and pulled by sandboxes (instead of --dockerfile)")
+@click.option("--published", "published", default=None, metavar="AGENT",
+              help="A shipped agent, e.g. claude-code: registers the image agent-env's release published for the agent "
+                   "this install ships, by its tag and digest, with the agent's folder as the build context "
+                   "(instead of --dockerfile)")
 @click.option("--env-var", "env_var_pairs", multiple=True, help="Default env var KEY=VALUE (repeatable)")
 @click.option("--metadata", "metadata_pairs", multiple=True, help="Metadata key=value pair (repeatable)")
 @click.option("--min-disk-size-gb", type=float, default=None, help="Minimum disk size in GB for agent deployment")
@@ -24,11 +29,11 @@ from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 @click.option("--skip-validation", is_flag=True, default=False, help="Skip A2A agent validation after registration")
 @click.option("--litellm-api-key", type=str, default=None, help="LiteLLM API key for validation prompts")
 @build_platform_option
-def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_ref: str | None, env_var_pairs: tuple[str, ...], metadata_pairs: tuple[str, ...], min_disk_size_gb: float | None, default_model: str | None, skip_validation: bool, litellm_api_key: str | None, build_platform: str):
+def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_ref: str | None, published: str | None, env_var_pairs: tuple[str, ...], metadata_pairs: tuple[str, ...], min_disk_size_gb: float | None, default_model: str | None, skip_validation: bool, litellm_api_key: str | None, build_platform: str):
     """Build a Docker image and register an A2A agent, or register one over an image already in a registry."""
 
-    if bool(dockerfile) == bool(image_ref):
-        click.echo("Error: exactly one of --dockerfile and --image-ref is required", err=True)
+    if sum(map(bool, (dockerfile, image_ref, published))) != 1:
+        click.echo("Error: exactly one of --dockerfile, --image-ref and --published is required", err=True)
         sys.exit(1)
     if context_path and not dockerfile:
         click.echo("Error: --context needs --dockerfile", err=True)
@@ -52,9 +57,25 @@ def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_r
 
     image_id = derive_id(agent_id, "agent_image")
     refuse_unwritable_ids(agent_id, image_id)
-    if image_ref:
+    if image_ref or published:
         if build_platform != DEFAULT_BUILD_PLATFORM:
-            click.echo(f"Warning: --platform {build_platform!r} is ignored for --image-ref, which builds nothing", err=True)
+            flag = "--image-ref" if image_ref else "--published"
+            click.echo(f"Warning: --platform {build_platform!r} is ignored for {flag}, which builds nothing", err=True)
+    if published:
+        image = _shipped_image(published)
+        digest = published_digest(image)
+        if digest is None:
+            click.echo(f"Error: no image is published for this install's {published} ({image.ref()}): a release's wheel "
+                       "from PyPI holds the sources its release published", err=True)
+            sys.exit(1)
+        folder = image.dockerfile.parent
+        artifact = DockerImageArtifact.put_ref(
+            image_id, description=f"A2A agent image for {agent_id}", image_name=image.ref(), image_digest=digest,
+            context_path=str(folder), dockerfile_path=str(image.dockerfile))
+        click.echo(f"Registered published image: id={artifact.id} version={artifact.version} "
+                   f"image={artifact.image_name}@{digest}")
+        metadata = detect_env_metadata(image.dockerfile, folder)
+    elif image_ref:
         artifact = DockerImageArtifact.put_ref(image_id, description=f"A2A agent image for {agent_id}", image_name=image_ref)
         click.echo(f"Registered image: id={artifact.id} version={artifact.version} image={artifact.image_name}")
         metadata = {}
@@ -96,3 +117,13 @@ def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_r
         from agent_env.cli.a2a_agent.validate import run_validation
         click.echo()
         run_validation(agent, litellm_api_key=litellm_api_key)
+
+
+def _shipped_image(name: str) -> PublishedImage:
+    """The published image of the shipped agent in folder ``name``."""
+    for image in AGENT_IMAGES:
+        if image.dockerfile.parent.name == name:
+            return image
+    names = ", ".join(image.dockerfile.parent.name for image in AGENT_IMAGES)
+    click.echo(f"Error: agent-env publishes no image for {name!r}; it publishes {names}", err=True)
+    sys.exit(1)

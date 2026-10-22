@@ -66,8 +66,8 @@ def test_an_agent_is_registered_over_an_image_in_a_registry(local_stores, pinned
 
 
 @pytest.mark.parametrize("extra, message", [
-    ([], "exactly one of --dockerfile and --image-ref is required"),
-    (["--image-ref", REF, "--dockerfile", "Dockerfile"], "exactly one of --dockerfile and --image-ref is required"),
+    ([], "exactly one of --dockerfile, --image-ref and --published is required"),
+    (["--image-ref", REF, "--dockerfile", "Dockerfile"], "exactly one of --dockerfile, --image-ref and --published is required"),
     (["--image-ref", REF, "--context", "."], "--context needs --dockerfile"),
 ])
 def test_an_agent_takes_one_image_source(local_stores, pinned, tmp_path, extra, message):

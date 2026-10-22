@@ -224,6 +224,7 @@ Use your own URI, not `urn:agentenv:*`. Reference: `packages/agentenv-protocol/e
 ```bash
 agent-env run ./my-bundle                                    # build, register under @local, run its tasks
 agent-env a2a-agent put --id my-agent --dockerfile my-bundle/agents/my-agent/Dockerfile
+agent-env a2a-agent put --id my-claude --published claude-code   # a shipped agent's released image, nothing built
 agent-env a2a-agent validate --id my-agent                   # agent-env's built-in checks
 agent-env a2a-agent get --id my-agent                        # the validation results
 ```

@@ -16,7 +16,10 @@ endpoint. The image holds Claude Code, which is Anthropic's software under its
 at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder with the protocol pinned as the wheel
 ships it. A run that deploys the agent registers that image when it's published for the sources installed: each deploy
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
-run it. The CLI's version is the Dockerfile's
+run it. To register that published image under an id of your own, in a store a hosted control plane reads,
+`agent-env a2a-agent put --id <id> --published claude-code` takes its tag and digest from the release installed and this
+folder as its build context, with nothing built or pushed; it refuses when no image is published for those sources, as
+for a git checkout. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
 `node`, without npm or npx, and the Python packages `model-requirements.txt` pins.
 
