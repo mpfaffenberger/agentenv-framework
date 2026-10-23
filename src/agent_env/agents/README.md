@@ -13,8 +13,8 @@ does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bear
 on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
 endpoint. The image holds Claude Code, which is Anthropic's software under its
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); a release also publishes the image, CLI included,
-at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder with the protocol pinned as the wheel
-ships it. A run that deploys the agent registers that image when it's published for the sources installed: each deploy
+at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder, and again only when
+the folder changes. A run that deploys the agent registers that image when it's published for the sources installed: each deploy
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. To register that published image under an id of your own, in a store a hosted control plane reads,
 `agent-env a2a-agent put --id <id> --published claude-code` takes its tag and digest from the release installed and this
@@ -31,10 +31,33 @@ or in `/app` on the host.
 
 `agents/pi/` runs the [pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) behind
 the protocol's A2A agent framework: each turn is one `pi --mode json` run, the task env's MCP servers go to its
-`mcp.json`, and its JSON events are the turn's trajectory. Name it as `@local/agentenv-framework/agents/pi`. It calls
+`mcp.json`, and its JSON events are the turn's trajectory. Name it as `pi`, its alias, or by its id,
+`@local/agentenv-framework/agents/pi`. It calls
 the `[model]` endpoint as an OpenAI-compatible one and takes its model from the prompt, so its smoke task needs
 `[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets.
 Its folder's `README.md` covers the extensions it implements.
 
-`agent-env run agents` runs every agent's smoke task, building each image; `--task claude-code-smoke` runs Claude
-Code's alone, `--task pi-smoke` pi's.
+`agents/codex/` runs OpenAI's [Codex CLI](https://github.com/openai/codex) behind the protocol's A2A agent framework:
+each turn is one `codex exec --json` run, resumed in the context's Codex thread, the task env's MCP servers go to its
+`config.toml` through `mcp-remote`, and its JSON events are the turn's trajectory. Name it as `codex`, its alias, or by
+its id, `@local/agentenv-framework/agents/codex`. It calls the `[model]` endpoint's OpenAI-compatible Responses API,
+`<base>/openai/v1/responses`, which a LiteLLM gateway serves, and takes its model from the prompt, so its smoke task
+needs `[model] default` (or the `agent` role) set. It declares `install/v1` too, into a container or onto a `vm`
+sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions it implements.
+
+`agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
+protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a
+persisted SDK conversation, the task env's MCP servers go to its `mcp_config`, and its SDK events are the turn's
+trajectory. Name it as `openhands`, its alias, or by its id, `@local/agentenv-framework/agents/openhands`. It
+calls the `[model]` endpoint through LiteLLM and takes its model from the prompt, so its smoke task needs
+`[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets. Its folder's
+`README.md` covers the extensions it implements.
+
+A release publishes Codex's, pi's and OpenHands' images too, at `ghcr.io/scaleapi/agentenv-codex:src-<hex>`,
+`ghcr.io/scaleapi/agentenv-pi:src-<hex>` and `ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only
+when its folder changes, and a run deploys
+them as it does Claude Code's: it pulls the image
+published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
+
+`agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs Claude
+Code's alone, `--task codex-smoke` Codex's, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'.
