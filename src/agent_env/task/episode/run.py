@@ -144,9 +144,12 @@ class TurnTools:
                       "timeout_seconds": self._timeout}
         result = await self._turn._checked(self._turn._proxy.act(self._turn._task_id, action))
         if result["kind"] == "bash":
-            timed_out = result["timed_out"]
-            text = "error: the command timed out" if timed_out else result["stdout"] + result["stderr"]
-            return ToolResult(content=[{"type": "text", "text": text}], isError=timed_out)
+            if result["timed_out"]:
+                return ToolResult(content=[{"type": "text", "text": "error: the command timed out"}], isError=True)
+            text = result["stdout"] + result["stderr"]
+            if failed := result["exit_code"] != 0:
+                text = "\n".join(filter(None, (text.removesuffix("\n"), f"exit code {result['exit_code']}")))
+            return ToolResult(content=[{"type": "text", "text": text}], isError=failed)
         return ToolResult(content=result["content"], isError=result["is_error"])
 
 

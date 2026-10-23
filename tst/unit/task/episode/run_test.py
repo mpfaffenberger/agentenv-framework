@@ -640,23 +640,27 @@ def _sandboxed_turn(proxy):
 
 
 @pytest.mark.asyncio
-async def test_a_turn_in_the_agents_sandbox_offers_bash_and_shows_its_output_as_verifiers_does():
+async def test_a_turn_in_the_agents_sandbox_offers_bash_and_shows_its_output_and_a_failed_exit():
     proxy = _SandboxedProxy({"slow": {"kind": "bash", "stdout": "", "stderr": "", "timed_out": True},
                              "both": {"kind": "bash", "exit_code": 2, "stdout": "out\n", "stderr": "err\n",
-                                      "timed_out": False}})
+                                      "timed_out": False},
+                             "quiet": {"kind": "bash", "exit_code": 1, "stdout": "", "stderr": "", "timed_out": False}})
 
     async with _sandboxed_turn(proxy).tools() as tools:
         assert [tool.name for tool in tools.list()] == ["items_add_item", "bash"]
-        assert (await tools.call("bash", {"command": "ls inputs"})).text == "ran ls inputs\n"
-        assert (await tools.call("bash", {"command": "both"})).text == "out\nerr\n"
+        ran = await tools.call("bash", {"command": "ls inputs"})
+        both = await tools.call("bash", {"command": "both"})
+        quiet = await tools.call("bash", {"command": "quiet"})
         timed_out = await tools.call("bash", {"command": "slow"})
         with pytest.raises(EpisodeError, match="tool 'bash' takes a command string, not 3"):
             await tools.call("bash", {"command": 3})
         assert (await tools.call("items_add_item", {"name": "crate"})).text == "added"
 
-    assert (timed_out.isError, timed_out.text) == (True, "error: the command timed out")
+    assert [(result.isError, result.text) for result in (ran, both, quiet, timed_out)] == [
+        (False, "ran ls inputs\n"), (True, "out\nerr\nexit code 2"), (True, "exit code 1"),
+        (True, "error: the command timed out")]
     assert proxy.actions == [{"kind": "bash", "command": "ls inputs"}, {"kind": "bash", "command": "both"},
-                             {"kind": "bash", "command": "slow"},
+                             {"kind": "bash", "command": "quiet"}, {"kind": "bash", "command": "slow"},
                              {"kind": "tool", "server": "items", "name": "items_add_item",
                               "arguments": {"name": "crate"}, "timeout_seconds": 600.0}]
 
