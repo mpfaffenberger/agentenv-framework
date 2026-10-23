@@ -13,9 +13,11 @@ import asyncio
 import contextlib
 import hmac
 import json
+import math
 import os
 import shutil
 import signal
+from collections import defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -56,8 +58,9 @@ from .extensions import (
 )
 from .framework import AgentEnvAgent, AgentIdentity, a2a_agent
 from .tasks.v1 import AgentConfig, TaskRequest, TaskResult, TextPart, TrajectoryLog, Usage
-from ..tool_client import ToolSession, ToolSessionError
+from ..tool_client import ToolResult, ToolSession, ToolSessionError
 from ..transfers import download
+from ..types import EnvironmentTool
 
 LONG_POLL_SECONDS = 25.0
 BASH_TIMEOUT_SECONDS = 3600
@@ -93,6 +96,8 @@ class _Turn:
     )
     actions: dict[str, asyncio.Task[ProxyBashResult | ProxyToolResult]] = field(default_factory=dict)
     sessions: dict[str, ToolSession] = field(default_factory=dict)
+    connecting: defaultdict[str, asyncio.Lock] = field(default_factory=lambda: defaultdict(asyncio.Lock))
+    closed: bool = False
     tools: dict[str, ProxyTool] | None = None
     listing: asyncio.Lock = field(default_factory=asyncio.Lock)
     recorded: bool = False
@@ -223,11 +228,11 @@ class ProxyAgent(AgentEnvAgent):
 
     @extension(PROXY_V1.record)
     async def record(self, request: ProxyRecordRequest) -> None:
-        turn = self._open_turn(request.token, request.task_id)
         content, calls = _read_message(request.message)
+        offered = await self._tools(self._open_turn(request.token, request.task_id))
+        turn = self._open_turn(request.token, request.task_id)
         if turn.pending:
             raise HTTPException(status_code=409, detail=_unrun(turn))
-        offered = await self._tools(turn)
         turn.pending = [(name, _canonical(arguments)) for name, arguments in calls if name in offered]
         turn.recorded = True
         turn.model = request.model or turn.model
@@ -279,7 +284,10 @@ class ProxyAgent(AgentEnvAgent):
                 offered = {BASH: BASH_TOOL} if self._shell else {}
                 for server in turn.servers:
                     try:
-                        listed = await (await self._session(turn, server)).list_tools()
+                        listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
+                    except TimeoutError:
+                        raise HTTPException(status_code=502, detail=(
+                            f"env server {server!r} didn't list its tools within {TOOL_TIMEOUT_SECONDS}s")) from None
                     except (ToolSessionError, httpx.HTTPError) as e:
                         raise HTTPException(status_code=502, detail=f"env server {server!r}: {e}") from None
                     for tool in listed:
@@ -292,15 +300,29 @@ class ProxyAgent(AgentEnvAgent):
                 turn.tools = offered
             return turn.tools
 
+    async def _listed(self, turn: _Turn, server: str) -> list[EnvironmentTool]:
+        return await (await self._session(turn, server)).list_tools()
+
+    async def _called(self, turn: _Turn, action: ProxyToolAction) -> ToolResult:
+        return await (await self._session(turn, action.server)).call_tool(action.name, action.arguments)
+
     async def _session(self, turn: _Turn, server: str) -> ToolSession:
-        if server not in turn.sessions:
-            registration = turn.servers.get(server)
-            if registration is None:
-                raise ToolSessionError(f"no env server {server!r} is registered")
-            turn.sessions[server] = await ToolSession(mcp_url=registration["url"],
-                                                      headers=registration.get("headers") or None,
-                                                      timeout=TOOL_TIMEOUT_SECONDS).open()
-        return turn.sessions[server]
+        """The turn's one connection to ``server``, which its first caller opens. It sets no deadline of its own: each
+        caller bounds what it waits for. None is opened, or kept, once the turn has closed."""
+        async with turn.connecting[server]:
+            if turn.closed:
+                raise ToolSessionError("the turn is over")
+            if server not in turn.sessions:
+                registration = turn.servers.get(server)
+                if registration is None:
+                    raise ToolSessionError(f"no env server {server!r} is registered")
+                session = await ToolSession(mcp_url=registration["url"], headers=registration.get("headers") or None,
+                                            timeout=math.inf).open()
+                if turn.closed:
+                    await session.close()
+                    raise ToolSessionError("the turn is over")
+                turn.sessions[server] = session
+            return turn.sessions[server]
 
     async def _perform(self, turn: _Turn, action: ProxyToolAction | ProxyBashAction) -> ProxyBashResult | ProxyToolResult:
         started = _now()
@@ -315,10 +337,9 @@ class ProxyAgent(AgentEnvAgent):
             timeout = action.timeout_seconds or TOOL_TIMEOUT_SECONDS
             name, arguments = action.name, action.arguments
             try:
-                session = await self._session(turn, action.server)
-                called = await asyncio.wait_for(session.call_tool(action.name, action.arguments), timeout)
+                called = await asyncio.wait_for(self._called(turn, action), timeout)
                 result = ProxyToolResult(content=called.content, is_error=called.isError)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 result = _tool_error(f"the tool call timed out after {timeout:g}s")
             except (ToolSessionError, httpx.HTTPError) as e:
                 result = _tool_error(f"{type(e).__name__}: {e}")
@@ -337,6 +358,7 @@ class ProxyAgent(AgentEnvAgent):
 
     async def _close(self, turn: _Turn) -> None:
         """Stop what the turn still runs and forget its actions, so what the driver never collected goes with it."""
+        turn.closed = True
         for action_id, task in turn.actions.items():
             task.cancel()
             self._actions.pop(action_id, None)
