@@ -50,6 +50,9 @@ async def test_an_agent_installed_on_a_vm_host_is_played_through_a_proxy_install
         {"id": "check", "type": "verify_sandbox", "sandbox_name": "vm", "base_dir": "/opt/agent-solver/workspace",
          "criteria": [{"type": "probe_file_contains", "criterion": "the greeting is copied",
                        "paths": ["outputs/answer.txt"], "expected": "^hello$"}]},
+        {"id": "check-agent", "type": "verify_sandbox", "agent_name": "solver", "base_dir": "/opt/agent-solver/workspace",
+         "criteria": [{"type": "probe_file_exists", "criterion": "the answer is on the agent's host",
+                       "paths": ["outputs/answer.txt"]}]},
     ]})
 
     episode = await EpisodeSpec.from_task(task).start()
@@ -61,7 +64,7 @@ async def test_an_agent_installed_on_a_vm_host_is_played_through_a_proxy_install
                 "/opt/agent-solver/workspace\nagent-solver\nhello")
             await tools.call("bash", {"command": "mkdir -p outputs && cp greeting.txt outputs/answer.txt"})
         await turn.end("Copied.")
-        assert await episode.result() == {"check": 1.0}
+        assert await episode.result() == {"check": 1.0, "check-agent": 1.0}
     finally:
         await episode.abandon("the test ended")
     [vm] = Task.get_instance(episode.id).context["deployed_sandboxes"]
