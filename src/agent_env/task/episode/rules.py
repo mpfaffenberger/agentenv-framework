@@ -1,7 +1,7 @@
 """Which steps a task may have when some of its agents are played from outside AgentEnv, and why the others are refused.
 
-An outside agent is played through a stand-in agent deployed in its place (the ``agents`` bundle's ``stand-in``), so
-steps that act on the agent, or in its sandbox, act on the stand-in. Every registered step type is either checked
+An outside agent is played through a proxy agent deployed in its place (the ``agents`` bundle's ``proxy``), so steps
+that act on the agent, or in its sandbox, act on the proxy. Every registered step type is either checked
 here (``CHECKS``) or listed as untouched by an outside agent (``UNAFFECTED``). A test holds the registry to the two, so
 a new step type is classified before an episode runs it. Plugin step types aren't inspected.
 """
@@ -51,7 +51,7 @@ def problems(steps: list[TaskStep], outside: list[str]) -> list[str]:
 
 
 def works_in_sandbox(steps: list[TaskStep], agent: str) -> bool:
-    """Whether ``steps`` use ``agent``'s sandbox, so its stand-in is deployed there rather than served in this
+    """Whether ``steps`` use ``agent``'s sandbox, so its proxy is deployed there rather than served in this
     process."""
     return any(step.agent_name == agent and (
         step.type in ("install_agent", "load_artifact", "run_code", "add_skills")
@@ -92,7 +92,7 @@ def _deploy_agent(step: DeployAgentTaskStep, outside: Outside) -> list[str]:
 def _install_agent(step: InstallAgentTaskStep, outside: Outside) -> list[str]:
     if step.agent_name not in outside.agents or step.container_name is None:
         return []
-    return [f"an outside agent's stand-in replaces an agent installed on the VM host, not in container "
+    return [f"an outside agent's proxy replaces an agent installed on the VM host, not in container "
             f"{step.container_name!r}"]
 
 
@@ -166,7 +166,7 @@ UNAFFECTED = frozenset({
     "agent_prompt_response_verifier", "verify_mcp_env_assessment",
     # It skips an agent that isn't deployed.
     "teardown_sandboxes",
-    # They act on an outside agent's stand-in, in its sandbox, as on the agent.
+    # They act on an outside agent's proxy, in its sandbox, as on the agent.
     "add_skills", "load_artifact", "run_code", "verify_sandbox",
 })
 

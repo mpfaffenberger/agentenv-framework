@@ -12,14 +12,14 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import bound_deployment, live_mcp_url
 
-# The agents bundle's stand-in, deployed in the place of an agent an episode plays.
-STAND_IN_AGENT_ID = "@local/agentenv-framework/agents/stand-in"
+# The agents bundle's proxy, deployed in the place of an agent an episode plays.
+PROXY_AGENT_ID = "@local/agentenv-framework/agents/proxy"
 
 
 class _EpisodeAgentStep(TaskStep):
     """An outside agent's ``deploy_agent`` or ``install_agent``. In a task that uses the agent's sandbox it runs that
-    step with the stand-in agent in the agent's place; otherwise it serves a stand-in in this process. Either way the
-    episode then plays the stand-in, which the agent's ``prompt_agent`` steps message as they would the agent."""
+    step with the proxy agent in the agent's place; otherwise it serves a proxy in this process. Either way the episode
+    then plays the proxy, which the agent's ``prompt_agent`` steps message as they would the agent."""
 
     type: ClassVar[str] = "episode_agent"
     entity_refs = ()
@@ -43,24 +43,22 @@ class _EpisodeAgentStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         episode = _episode_of(context)
         agent = self.step.agent_name
-        role = getattr(self.step, "role", None)
-        mcp_urls = {}
-        for env_id in getattr(self.step, "env_ids", None) or []:
-            deployed = bound_deployment(context, env_id, env_step_id=self.step.env_step_id, step_id=self.id)
-            mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
         if not self.sandboxed:
-            deployed = await episode._serve_in_process(agent, role, mcp_urls)
+            mcp_urls = {}
+            for env_id in getattr(self.step, "env_ids", None) or []:
+                deployed = bound_deployment(context, env_id, env_step_id=self.step.env_step_id, step_id=self.id)
+                mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
+            deployed = await episode._serve_in_process(agent, getattr(self.step, "role", None), mcp_urls)
             context.deployed_agents.append(deployed)
             if system_prompt := getattr(self.step, "system_prompt", None):
                 config = A2AAgent.negotiate_agent_config(deployed.a2a_card, {"system_prompt": system_prompt})
                 await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields)
             return context
-        await asyncio.to_thread(write_installed, STAND_IN_AGENT_ID)
-        override = {"a2a_agent_id": STAND_IN_AGENT_ID} if self.step.type == "deploy_agent" else {
-            "stand_in": STAND_IN_AGENT_ID}
+        await asyncio.to_thread(write_installed, PROXY_AGENT_ID)
+        override = {"a2a_agent_id": PROXY_AGENT_ID} if self.step.type == "deploy_agent" else {"proxy": PROXY_AGENT_ID}
         step_params = context.metadata.setdefault("user_overrides", {}).setdefault("step_params", {})
         step_params[self.step.id] = {**step_params.get(self.step.id, {}), **override}
         context = await self.step.execute(context)
         deployed = next(deployed for deployed in context.deployed_agents if deployed.agent_name == agent)
-        await episode._attach(agent, deployed, role, mcp_urls, shell=True)
+        await episode._attach(agent, deployed)
         return context

@@ -312,25 +312,25 @@ def test_the_trust_lines_resolve_as_the_trust_env_param():
     resolvers = _build_param_resolvers(container_name="c", work_dir="/w", agent_ctx_tar="/w/a.tgz", a2a_port=8000,
                                        config=None, agent_name="a", trust_lines="SSL_CERT_FILE=/x\n")
     assert resolvers["trust_env"]() == "SSL_CERT_FILE=/x\n"
-STAND_IN = "@local/agentenv-framework/agents/stand-in"
+PROXY = "@local/agentenv-framework/agents/proxy"
 CODEX_INSTALL = {"params": {"workdir_host": "/opt/agent-{agent_name}/workspace", "user_host": "agent-{agent_name}",
                             "install_commands_host": ["install codex"], "a2a_port": 8000}}
-STAND_IN_INSTALL = {"params": {"install_commands_host": ["serve as {user} in {workdir} on {a2a_port}"],
+PROXY_INSTALL = {"params": {"install_commands_host": ["serve as {user} in {workdir} on {a2a_port}"],
                                "required_params_host": ["user", "workdir", "a2a_port"], "a2a_port": 8000}}
 
 
 def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, container_name=None):
-    """An install of ``agent-x`` that the step's ``stand_in`` param replaces with the stand-in."""
+    """An install of ``agent-x`` that the step's ``proxy`` param replaces with the proxy."""
     sandbox = sandbox or _InstallSandbox()
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
                         lambda name: SimpleNamespace(get_sandbox=_resolved(sandbox)))
     agents = {agent_id: SimpleNamespace(id=agent_id, version=1, metadata={}, docker_image_artifact=SimpleNamespace(
         image_name=f"{agent_id}-image", build_context_object_url=f"s3://bucket/{agent_id}.tar.gz"))
-        for agent_id in ("agent-x", STAND_IN)}
+        for agent_id in ("agent-x", PROXY)}
     monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda agent_id, version=None: agents[agent_id]))
     step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver",
                                 container_name=container_name)
-    cards = {"agent-x-image": codex, f"{STAND_IN}-image": STAND_IN_INSTALL}
+    cards = {"agent-x-image": codex, f"{PROXY}-image": PROXY_INSTALL}
     monkeypatch.setattr(step, "_extract_install_extension", lambda sandbox, image: _resolved(cards[image])())
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
     monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
@@ -338,14 +338,14 @@ def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, cont
         deployed_sandboxes=[DeployedSandbox(
             sandbox_name="vm", sandbox_id="sb-1", sandbox_mode="vm", sandbox_type="modal_vm",
             tunnel_urls={"8000": "https://vm-8000.example"})],
-        metadata={"user_overrides": {"step_params": {"i": {"stand_in": STAND_IN}}},
+        metadata={"user_overrides": {"step_params": {"i": {"proxy": PROXY}}},
                   "deployed_docker_containers": [{"container_name": "task", "sandbox_name": "vm"}]},
     )
     return step, context, sandbox
 
 
 @pytest.mark.asyncio
-async def test_a_stand_in_is_installed_where_the_agent_it_replaces_says_it_works(monkeypatch, local_stores):
+async def test_a_proxy_is_installed_where_the_agent_it_replaces_says_it_works(monkeypatch, local_stores):
     step, context, sandbox = _installing_in_place(monkeypatch)
 
     await step.execute(context)
@@ -356,7 +356,7 @@ async def test_a_stand_in_is_installed_where_the_agent_it_replaces_says_it_works
 
 
 @pytest.mark.asyncio
-async def test_a_stand_in_needs_the_replaced_agent_to_say_where_it_works(monkeypatch, local_stores):
+async def test_a_proxy_needs_the_replaced_agent_to_say_where_it_works(monkeypatch, local_stores):
     step, context, _ = _installing_in_place(monkeypatch, codex={"params": {"install_commands_host": ["install codex"],
                                                                          "workdir_host": "/opt/agent"}})
 
@@ -365,7 +365,7 @@ async def test_a_stand_in_needs_the_replaced_agent_to_say_where_it_works(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_a_stand_in_isnt_installed_into_a_container(monkeypatch, local_stores):
+async def test_a_proxy_isnt_installed_into_a_container(monkeypatch, local_stores):
     step, context, _ = _installing_in_place(monkeypatch, container_name="task")
 
     with pytest.raises(RuntimeError, match="installed on the VM host, not in a container"):
@@ -373,7 +373,7 @@ async def test_a_stand_in_isnt_installed_into_a_container(monkeypatch, local_sto
 
 
 @pytest.mark.asyncio
-async def test_a_stand_in_isnt_installed_on_a_sandbox_that_runs_on_this_machine(monkeypatch, local_stores):
+async def test_a_proxy_isnt_installed_on_a_sandbox_that_runs_on_this_machine(monkeypatch, local_stores):
     here = _InstallSandbox()
     here.ON_THIS_MACHINE = True
     step, context, _ = _installing_in_place(monkeypatch, sandbox=here)
@@ -383,7 +383,7 @@ async def test_a_stand_in_isnt_installed_on_a_sandbox_that_runs_on_this_machine(
 
 
 def test_only_an_install_in_another_agents_place_gives_its_workdir_and_user():
-    with pytest.raises(KeyError, match="stand_in"):
+    with pytest.raises(KeyError, match="proxy"):
         _resolvers(None)["workdir"]()
     placed = _build_param_resolvers(
         container_name=None, work_dir="/tmp/w", agent_ctx_tar="/tmp/w/c.tgz", a2a_port=8000, config=object(),

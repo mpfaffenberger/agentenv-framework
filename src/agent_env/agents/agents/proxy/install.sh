@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs the stand-in onto this Linux host from the folder this script is in, and starts it on PORT, as USER in
+# Installs the proxy onto this Linux host from the folder this script is in, and starts it on PORT, as USER in
 # WORKDIR, the place of the agent it replaces:
 #
 #   install.sh NAME PORT WORKDIR USER
@@ -8,7 +8,7 @@
 set -eu
 name=$1 port=$2 workdir=$3 user=$4
 here=$(cd "$(dirname "$0")" && pwd)
-root=/opt/agentenv-stand-in-$name
+root=/opt/agentenv-proxy-$name
 
 if ! python3 -c "import ensurepip, venv" 2>/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
@@ -24,4 +24,4 @@ id -u "$user" >/dev/null 2>&1 || useradd -m "$user"
 mkdir -p "$workdir"
 chown -R "$user": "$workdir"
 nohup runuser -u "$user" -- env -C "$workdir" A2A_PORT="$port" "$root/venv/bin/python" "$root/a2a_server.py" \
-    >"/tmp/agentenv-stand-in-$name.log" 2>&1 </dev/null &
+    >"/tmp/agentenv-proxy-$name.log" 2>&1 </dev/null &

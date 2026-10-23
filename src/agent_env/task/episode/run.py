@@ -1,36 +1,29 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from agentenv_protocol import EnvironmentTool, ToolResult, ToolSession
+from agentenv_protocol import EnvironmentTool, ToolResult
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 from agent_env.store.routing import namespace_routing
-from agent_env.task.episode.stand_in import InProcessStandIn, StandInClient
+from agent_env.task.episode.proxy import InProcessProxy, ProxyClient, ProxyRefused
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.task import Task, recorded_scores, substitute_seed_in_steps
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.task_steps.deploy_agent import _mcp_add_body
 
 logger = logging.getLogger(__name__)
 
 _live: dict[str, Episode] = {}
 _DRAIN_RETRY_SECONDS = 1.0
 _CARD_TIMEOUT_SECONDS = 10.0
-
-BASH = EnvironmentTool(
-    name="bash",
-    description="Run a bash command where the agent works, as its user. Returns its stdout, then its stderr.",
-    inputSchema={"type": "object", "properties": {"command": {"type": "string", "description": "The command to run."}},
-                 "required": ["command"]},
-)
 
 
 class EpisodeError(RuntimeError):
@@ -43,130 +36,118 @@ class Skill:
 
     name: str
     description: str
-    path: str | None
+    path: str
 
 
 class Turn:
-    """An outside agent's turn. Its model reads ``system_prompt``, ``prompt`` and ``skills``, acts through ``tools()``
-    (or an MCP client of its own on ``mcp_urls``, sending ``headers`` and ``role``), and hands its reply back with
-    ``end()``."""
+    """An outside agent's turn. Its model reads ``system_prompt``, ``prompt`` and ``skills``, acts through ``tools()``,
+    each of its calls recorded with ``record_model_call()``, and hands its reply back with ``end()``. Every action runs
+    in the agent's proxy, which records the turn."""
 
     def __init__(
-        self, *, agent: str, step_id: str, prompt: str, system_prompt: str | None, role: str | None,
-        mcp_urls: dict[str, str], skills: list[Skill], shell: bool, stand_in: StandInClient, task_id: str,
+        self, *, agent: str, step_id: str, prompt: str, system_prompt: str | None, skills: list[Skill],
+        proxy: ProxyClient, task_id: str,
     ):
         self.agent = agent
         self.step_id = step_id
         self.prompt = prompt
         self.system_prompt = system_prompt
-        self.role = role
-        self.mcp_urls = mcp_urls
-        self.headers = {env_id: sandbox_request_headers_for_url(url) for env_id, url in mcp_urls.items()}
         self.skills = skills
-        self._shell = shell
-        self._stand_in = stand_in
+        self._proxy = proxy
         self._task_id = task_id
-        self._spans: list[dict[str, Any]] = []
-        self._started = _now()
         self._open = True
 
     def tools(self, *, timeout: float = 600.0) -> TurnTools:
-        """A client for the tools of the envs this agent acts in, calling them as its role with the headers each URL
-        needs, and ``bash`` when it works in a sandbox; use it with ``async with``. ``timeout`` bounds each env tool's
+        """A client for what this turn can call: the tools of the envs its agent acts in, and ``bash`` when it works
+        in a sandbox, each run where the agent works; use it with ``async with``. ``timeout`` bounds each env tool's
         call, in seconds."""
         return TurnTools(self, timeout)
 
+    async def record_model_call(self, message: str | dict[str, Any], *, model: str | None = None,
+                                usage: dict[str, Any] | None = None) -> None:
+        """Record one of the model's calls, once it has returned: an OpenAI chat message, an Anthropic message or a
+        string. From then on each call to the turn's tools must be one the last recorded call made, and all must run
+        before the next is recorded or the turn ends; else ``EpisodeError``. Calls to tools the turn doesn't offer
+        aren't checked."""
+        await self._checked(self._proxy.record(self._task_id, message, model, usage))
+
     async def end(self, response: str | None = None) -> None:
         """Hand the turn back, and the run carries on. No reply records an empty one, as an agent that answers with
-        nothing leaves. Once the turn is over, ended or not, this does nothing; a stand-in that can't be reached
-        fails the run, which ``next_turn()`` and ``result()`` report."""
+        nothing leaves. Once the turn is over, ended or not, this does nothing. Raises ``EpisodeError``, leaving the
+        turn open, while calls a recorded model call made haven't run; a proxy that can't be reached fails the run,
+        which ``next_turn()`` and ``result()`` report."""
         if not self._open:
             return
+        try:
+            await self._checked(self._proxy.reply(self._task_id, parts=[{"kind": "text", "text": response or ""}]))
+        except httpx.HTTPError as e:
+            logger.warning("turn %r of agent %r: its reply didn't reach the proxy: %s", self.step_id, self.agent, e)
         self._open = False
-        reply = response or ""
-        spans = [*self._spans, _span("turn", "chain", self._started, completion={"content": [
-            {"type": "text", "text": reply}]})]
-        await self._reply(text=reply, trajectory=spans, tool_call_count=len(self._spans))
 
     async def _fail(self, error: Exception) -> None:
         if self._open:
             self._open = False
-            await self._reply(error=str(error))
+            try:
+                await self._proxy.reply(self._task_id, error=str(error))
+            except httpx.HTTPError as e:
+                logger.warning("turn %r of agent %r: its failure didn't reach the proxy: %s", self.step_id, self.agent,
+                               e)
 
-    async def _reply(self, **reply: Any) -> None:
+    async def _checked(self, call: Any) -> Any:
+        """``call``'s answer, with the proxy's refusal, or a turn it no longer has, as an ``EpisodeError``."""
+        if not self._open:
+            call.close()
+            raise EpisodeError(f"turn {self.step_id!r} of agent {self.agent!r} is over")
         try:
-            await self._stand_in.reply(self._task_id, **reply)
-        except httpx.HTTPError as e:
-            logger.warning("turn %r of agent %r: its reply didn't reach the stand-in: %s", self.step_id, self.agent, e)
+            return await call
+        except ProxyRefused as e:
+            raise EpisodeError(f"turn {self.step_id!r} of agent {self.agent!r}: {e}") from None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                self._open = False
+                raise EpisodeError(f"turn {self.step_id!r} of agent {self.agent!r} is over") from None
+            raise
 
 
 class TurnTools:
-    """The tools of a turn, listed once when it opens: its envs', and ``bash`` when its agent works in a sandbox.
-    ``list()`` names every one, ``call()`` routes a call to what offers it, and each call goes in the turn's
-    trajectory."""
+    """What a turn can call, listed once when it opens: its envs' tools, and ``bash`` when its agent works in a
+    sandbox. ``list()`` names every one, and ``call()`` has the agent's proxy run a call where the agent works."""
 
     def __init__(self, turn: Turn, timeout: float):
         self._turn = turn
-        self._sessions = {
-            env_id: ToolSession(mcp_url=url, role=turn.role, headers=turn.headers[env_id], timeout=timeout)
-            for env_id, url in turn.mcp_urls.items()
-        }
+        self._timeout = timeout
         self._tools: list[EnvironmentTool] = []
-        self._offered_by: dict[str, str | None] = {}
+        self._servers: dict[str, str | None] = {}
 
     async def __aenter__(self) -> TurnTools:
-        try:
-            for env_id, session in self._sessions.items():
-                await session.open()
-                for tool in await session.list_tools():
-                    if (other := self._offered_by.get(tool.name)) is not None:
-                        raise EpisodeError(f"tool {tool.name!r} is offered by both env {other!r} and env {env_id!r}")
-                    self._offered_by[tool.name] = env_id
-                    self._tools.append(tool)
-            if self._turn._shell:
-                if (env_id := self._offered_by.get(BASH.name)) is not None:
-                    raise EpisodeError(f"tool {BASH.name!r} is offered by env {env_id!r}, and the agent's sandbox "
-                                       "offers its own")
-                self._offered_by[BASH.name] = None
-                self._tools.append(BASH)
-        except BaseException:
-            await self._close()
-            raise
+        for tool in await self._turn._checked(self._turn._proxy.tools(self._turn._task_id)):
+            self._tools.append(EnvironmentTool(name=tool["name"], description=tool.get("description"),
+                                               inputSchema=tool.get("input_schema")))
+            self._servers[tool["name"]] = tool.get("server")
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
-        await self._close()
+        pass
 
     def list(self) -> list[EnvironmentTool]:
         return list(self._tools)
 
     async def call(self, name: str, arguments: dict[str, Any] | None = None) -> ToolResult:
-        if name not in self._offered_by:
-            raise EpisodeError(
-                f"no env of turn {self._turn.step_id!r} offers tool {name!r}; they offer {sorted(self._offered_by)}")
-        started, env_id = _now(), self._offered_by[name]
-        try:
-            if env_id is None:
-                result = await self._bash(arguments or {})
-            else:
-                result = await self._sessions[env_id].call_tool(name, arguments)
-        except Exception as e:
-            self._record(name, arguments, started, {"error": f"{type(e).__name__}: {e}"})
-            raise
-        self._record(name, arguments, started, {"output": result.content})
-        return result
-
-    def _record(self, name: str, arguments: dict[str, Any] | None, started: str, completion: dict[str, Any]) -> None:
-        self._turn._spans.append(_span(name, "execute_tool", started, prompt={"input": arguments or {}},
-                                       completion=completion))
-
-    async def _bash(self, arguments: dict[str, Any]) -> ToolResult:
-        if not isinstance(command := arguments.get("command"), str):
-            raise EpisodeError(f"tool {BASH.name!r} takes a command string, not {command!r}")
-        return ToolResult(content=[{"type": "text", "text": await self._turn._stand_in.run(command)}])
-
-    async def _close(self) -> None:
-        await asyncio.gather(*(session.close() for session in self._sessions.values()))
+        if name not in self._servers:
+            raise EpisodeError(f"turn {self._turn.step_id!r} offers no tool {name!r}; it offers {sorted(self._servers)}")
+        if (server := self._servers[name]) is None:
+            if not isinstance(command := (arguments or {}).get("command"), str):
+                raise EpisodeError(f"tool {name!r} takes a command string, not {command!r}")
+            action = {"kind": "bash", "command": command}
+        else:
+            action = {"kind": "tool", "server": server, "name": name, "arguments": arguments or {},
+                      "timeout_seconds": self._timeout}
+        result = await self._turn._checked(self._turn._proxy.act(self._turn._task_id, action))
+        if result["kind"] == "bash":
+            timed_out = result["timed_out"]
+            text = "error: the command timed out" if timed_out else result["stdout"] + result["stderr"]
+            return ToolResult(content=[{"type": "text", "text": text}], isError=timed_out)
+        return ToolResult(content=result["content"], isError=result["is_error"])
 
 
 class Episode:
@@ -185,10 +166,10 @@ class Episode:
         self._changed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._tearing_down = False
         self._abandoned: str | None = None
-        self._stand_ins: list[StandInClient] = []
+        self._proxies: list[ProxyClient] = []
         self._drains: list[asyncio.Task[None]] = []
         self._played: set[str] = set()
-        self._in_process: list[InProcessStandIn] = []
+        self._in_process: list[InProcessProxy] = []
 
     async def next_turn(self) -> Turn | None:
         """The next outside turn the run reaches, or None once the run has finished. Raises the run's error if it
@@ -248,7 +229,7 @@ class Episode:
             raise
 
     async def _drive(self, running: asyncio.Event) -> None:
-        """Run the task with namespace routing on, as ``agent-env run`` does, so the stand-in, an ``@local`` agent,
+        """Run the task with namespace routing on, as ``agent-env run`` does, so the proxy, an ``@local`` agent,
         resolves."""
         running.set()
         with namespace_routing():
@@ -257,7 +238,7 @@ class Episode:
             finally:
                 self._tearing_down = True
                 try:
-                    await self._release_stand_ins()
+                    await self._release_proxies()
                     report = await teardown_run(self._context)
                     if report.still_up:
                         logger.warning("episode %s: %s may still be up", self.id,
@@ -272,7 +253,7 @@ class Episode:
         await asyncio.wait((self._run, changed), return_when=asyncio.FIRST_COMPLETED)
 
     def _close_turns_of_failed_steps(self) -> None:
-        """A step that failed has given up on its turns, which its stand-in drops only a long-poll later."""
+        """A step that failed has given up on its turns, which its proxy drops only a long-poll later."""
         failed = {failure.get("step_id") for failure in self._context.metadata.get("failed_steps") or []}
         for turn in self._turns:
             if turn.step_id in failed:
@@ -285,34 +266,36 @@ class Episode:
             raise error
 
     async def _serve_in_process(self, agent: str, role: str | None, mcp_urls: dict[str, str]) -> DeployedAgent:
-        """A stand-in served in this process for ``agent``, which works in no sandbox, played as the others are."""
-        server = InProcessStandIn()
+        """A proxy served in this process for ``agent``, which works in no sandbox, with each env server registered as
+        ``deploy_agent`` registers them with any agent, at the URL this process reaches: played as the others are."""
+        server = InProcessProxy()
         self._in_process.append(server)
         url = await server.start()
         async with httpx.AsyncClient(timeout=_CARD_TIMEOUT_SECONDS) as client:
             response = await client.get(f"{url}/.well-known/agent.json")
             response.raise_for_status()
-        deployed = DeployedAgent(agent_name=agent, api_url=url, a2a_url=url, a2a_card=response.json(), role=role)
-        await self._attach(agent, deployed, role, mcp_urls, shell=False)
+            card = response.json()
+            mcp_config = A2AAgent.find_extension(card, A2AAgent.EXT_MCP_CONFIG)
+            for env_id, mcp_url in mcp_urls.items():
+                body = _mcp_add_body(mcp_config, mcp_url, sandbox_request_headers_for_url(mcp_url), env_id, role)
+                (await client.post(url + mcp_config["params"]["endpoint"], json=body)).raise_for_status()
+        deployed = DeployedAgent(agent_name=agent, api_url=url, a2a_url=url, a2a_card=card, role=role)
+        await self._attach(agent, deployed)
         return deployed
 
-    async def _attach(
-        self, agent: str, deployed: DeployedAgent, role: str | None, mcp_urls: dict[str, str], *, shell: bool,
-    ) -> None:
-        """Claim ``agent``'s stand-in and hand out the turns it opens."""
-        stand_in = StandInClient(deployed.a2a_url, deployed.a2a_card or {})
-        self._stand_ins.append(stand_in)
-        await stand_in.claim()
-        self._drains.append(asyncio.create_task(self._drain(agent, stand_in, role, mcp_urls, shell)))
+    async def _attach(self, agent: str, deployed: DeployedAgent) -> None:
+        """Claim ``agent``'s proxy and hand out the turns it opens."""
+        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {})
+        self._proxies.append(proxy)
+        await proxy.claim()
+        self._drains.append(asyncio.create_task(self._drain(agent, proxy)))
 
-    async def _drain(
-        self, agent: str, stand_in: StandInClient, role: str | None, mcp_urls: dict[str, str], shell: bool,
-    ) -> None:
-        """Hand out each turn the stand-in opens, and close each one it drops, until the run ends."""
+    async def _drain(self, agent: str, proxy: ProxyClient) -> None:
+        """Hand out each turn the proxy opens, and close each one it drops, until the run ends."""
         after, open_turns = 0, {}
         while True:
             try:
-                answer = await stand_in.next(after)
+                answer = await proxy.next(after)
             except httpx.HTTPError as e:
                 logger.warning("episode %s: reading agent %r's turns failed, retrying: %s", self.id, agent, e)
                 await asyncio.sleep(_DRAIN_RETRY_SECONDS)
@@ -326,10 +309,10 @@ class Episode:
             for task_id, item in listed.items():
                 if task_id not in open_turns:
                     open_turns[task_id] = turn = Turn(
-                        agent=agent, step_id=self._step_of(agent, item["context_id"]), prompt=item["text"],
-                        system_prompt=item.get("system_prompt"), role=role, mcp_urls=dict(mcp_urls),
-                        skills=[Skill(**skill) for skill in item.get("skills", [])], shell=shell, stand_in=stand_in,
-                        task_id=task_id,
+                        agent=agent, step_id=self._step_of(agent, item["context_id"]),
+                        prompt="\n".join(part["text"] for part in item["parts"]),
+                        system_prompt=item.get("system_prompt"),
+                        skills=[Skill(**skill) for skill in item.get("skills", [])], proxy=proxy, task_id=task_id,
                     )
                     self._waiting.append(turn)
                     self._turns.add(turn)
@@ -350,7 +333,7 @@ class Episode:
     def _seeded_steps(self) -> list:
         return substitute_seed_in_steps(self._task.steps, self._context.metadata.get("seed") or {})
 
-    async def _release_stand_ins(self) -> None:
+    async def _release_proxies(self) -> None:
         for drain in self._drains:
             drain.cancel()
         await asyncio.gather(*self._drains, return_exceptions=True)
@@ -358,21 +341,7 @@ class Episode:
             turn._open = False
         for server in self._in_process:
             server.stop()
-        await asyncio.gather(*(stand_in.close() for stand_in in self._stand_ins), return_exceptions=True)
-
-
-def _span(name: str, operation: str, started: str, *, prompt: Any = None, completion: Any = None) -> dict[str, Any]:
-    """An OTel GenAI span, the trajectory format rubrics read."""
-    attributes = {"gen_ai.operation.name": operation}
-    if prompt is not None:
-        attributes["gen_ai.prompt"] = json.dumps(prompt, default=str)
-    if completion is not None:
-        attributes["gen_ai.completion"] = json.dumps(completion, default=str)
-    return {"name": name, "start_time": started, "end_time": _now(), "attributes": attributes}
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+        await asyncio.gather(*(proxy.close() for proxy in self._proxies), return_exceptions=True)
 
 
 def _episode_of(context: TaskStepContext) -> Episode:

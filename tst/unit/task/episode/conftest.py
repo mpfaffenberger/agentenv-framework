@@ -1,4 +1,4 @@
-"""An episode's turns reach a stand-in agent this process serves on loopback, so these tests allow loopback
+"""An episode's turns reach a proxy agent this process serves on loopback, so these tests allow loopback
 connections and nothing else."""
 
 import pytest

@@ -6,7 +6,8 @@ import json
 import httpx
 import pytest
 import pytest_asyncio
-from agentenv_protocol import EnvironmentTool, ToolResult
+from agentenv_protocol import EnvironmentTool, ToolResult, ToolSessionError
+from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 import agent_env.task.episode.run as episode_run
 from agent_env.config import get_config
@@ -107,8 +108,8 @@ class _Teardowns:
 
 
 class _ToolSessions:
-    """Stands in for ``ToolSession``: the session on each URL serves the tools ``offered`` names for it, and every
-    session opened, call made and session closed is recorded."""
+    """Stands in for the proxy's ``ToolSession``: the session on each URL serves the tools ``offered`` names for it,
+    and every session opened, call made and session closed is recorded."""
 
     def __init__(self, offered, raises=None):
         self.offered = offered
@@ -117,12 +118,12 @@ class _ToolSessions:
         self.calls = []
         self.closed = []
 
-    def __call__(self, *, mcp_url, role, headers, timeout):
+    def __call__(self, *, mcp_url, headers=None, timeout):
         sessions = self
 
         class _Session:
             async def open(self):
-                sessions.opened.append((mcp_url, role, headers, timeout))
+                sessions.opened.append((mcp_url, headers))
                 return self
 
             async def list_tools(self):
@@ -187,9 +188,8 @@ async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(tear
     assert Task.get_instance(episode.id).status == "running"
 
     turn = await episode.next_turn()
-    assert (turn.agent, turn.step_id, turn.prompt, turn.system_prompt, turn.role) == (
-        "alice", "turn", "Add a crate.", "You keep the items.", "alice@example.com")
-    assert (turn.mcp_urls, turn.headers) == ({"items": "http://127.0.0.1:20031/items/mcp"}, {"items": {}})
+    assert (turn.agent, turn.step_id, turn.prompt, turn.system_prompt) == (
+        "alice", "turn", "Add a crate.", "You keep the items.")
 
     await turn.end("Added a crate.")
     assert await episode.result() == {"replies": 1.0}
@@ -204,30 +204,21 @@ async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(tear
         ("alice", None)]
 
 
-@pytest.mark.asyncio
-async def test_a_turn_carries_the_headers_each_url_needs(teardowns, monkeypatch):
-    monkeypatch.setattr(episode_run, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
-    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
-
-    turn = await episode.next_turn()
-
-    assert turn.headers == {"items": {"X-Sandbox": "http://127.0.0.1:20031/items/mcp"}}
-
-
 ITEMS_MCP, PANTRY_MCP = "http://127.0.0.1:20031/items/mcp", "http://127.0.0.1:20031/pantry/mcp"
 PANTRY = {"id": "pantry", "type": "episode_test_env", "env_id": "pantry"}
 STOCKED = {**ALICE, "env_ids": ["items", "pantry"]}
+ROLE = "AgentEnv-Role"
 
 
 def _tool_sessions(monkeypatch, offered, raises=None):
     sessions = _ToolSessions(offered, raises)
-    monkeypatch.setattr(episode_run, "ToolSession", sessions)
+    monkeypatch.setattr(proxy_module, "ToolSession", sessions)
     monkeypatch.setattr(episode_run, "sandbox_request_headers_for_url", lambda url: {"X-Sandbox": url})
     return sessions
 
 
 @pytest.mark.asyncio
-async def test_a_turns_tools_call_each_env_as_its_role_with_its_headers(teardowns, monkeypatch):
+async def test_a_turns_env_tools_run_in_its_proxy_with_the_headers_each_url_needs_and_the_role(teardowns, monkeypatch):
     sessions = _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"], PANTRY_MCP: ["pantry_count"]})
     episode = await _spec(ITEMS, PANTRY, STOCKED, TURN, REPLIES).start()
     turn = await episode.next_turn()
@@ -235,26 +226,27 @@ async def test_a_turns_tools_call_each_env_as_its_role_with_its_headers(teardown
     async with turn.tools(timeout=30) as tools:
         assert [tool.name for tool in tools.list()] == ["items_add_item", "pantry_count"]
         assert (await tools.call("pantry_count")).text == f"pantry_count on {PANTRY_MCP}"
+    await turn.end("Counted.")
+    await episode.result()
 
-    assert sessions.opened == [(url, "alice@example.com", {"X-Sandbox": url}, 30) for url in (ITEMS_MCP, PANTRY_MCP)]
-    assert sessions.calls == [(PANTRY_MCP, "pantry_count", None)]
+    assert sessions.opened == [(url, {"X-Sandbox": url, ROLE: "alice@example.com"}) for url in (ITEMS_MCP, PANTRY_MCP)]
+    assert sessions.calls == [(PANTRY_MCP, "pantry_count", {})]
     assert sorted(sessions.closed) == [ITEMS_MCP, PANTRY_MCP]
 
 
 @pytest.mark.asyncio
-async def test_a_tool_two_envs_offer_is_refused_as_the_tools_open_and_nothing_is_left_open(teardowns, monkeypatch):
-    sessions = _tool_sessions(monkeypatch, {ITEMS_MCP: ["count"], PANTRY_MCP: ["count"]})
+async def test_a_tool_two_envs_offer_is_refused_as_the_tools_open(teardowns, monkeypatch):
+    _tool_sessions(monkeypatch, {ITEMS_MCP: ["count"], PANTRY_MCP: ["count"]})
     episode = await _spec(ITEMS, PANTRY, STOCKED, TURN, REPLIES).start()
     turn = await episode.next_turn()
 
-    with pytest.raises(EpisodeError, match="tool 'count' is offered by both env 'items' and env 'pantry'"):
+    with pytest.raises(EpisodeError, match="tool 'count' is offered by both 'items' and 'pantry'"):
         async with turn.tools():
             pass
-    assert sorted(sessions.closed) == [ITEMS_MCP, PANTRY_MCP]
 
 
 @pytest.mark.asyncio
-async def test_a_tool_no_env_offers_is_refused(teardowns, monkeypatch):
+async def test_a_tool_the_turn_doesnt_offer_is_refused(teardowns, monkeypatch):
     _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]})
     episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
     turn = await episode.next_turn()
@@ -262,7 +254,26 @@ async def test_a_tool_no_env_offers_is_refused(teardowns, monkeypatch):
     async with turn.tools() as tools:
         with pytest.raises(EpisodeError) as raised:
             await tools.call("nope")
-    assert str(raised.value) == "no env of turn 'turn' offers tool 'nope'; they offer ['items_add_item']"
+    assert str(raised.value) == "turn 'turn' offers no tool 'nope'; it offers ['items_add_item']"
+
+
+@pytest.mark.asyncio
+async def test_an_env_tool_that_fails_answers_an_error_and_is_recorded(teardowns, monkeypatch):
+    _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]},
+                   raises={"items_add_item": ToolSessionError("the env didn't answer")})
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+    turn = await episode.next_turn()
+
+    async with turn.tools() as tools:
+        result = await tools.call("items_add_item", {"name": "crate"})
+    await turn.end("Gave up.")
+    await episode.result()
+
+    assert (result.isError, result.text) == (True, "error: ToolSessionError: the env didn't answer")
+    [response] = Task.get_instance(episode.id).context["prompt_responses"]
+    stored = json.loads(get_config().get_object_store().get(response["agent_trajectory_object_url"]))
+    assert json.loads(stored[0]["attributes"]["gen_ai.completion"]) == {
+        "error": "error: ToolSessionError: the env didn't answer"}
 
 
 @pytest.mark.asyncio
@@ -301,7 +312,8 @@ async def test_episodes_of_one_spec_run_side_by_side_each_with_its_own_record(te
 
 
 @pytest.mark.asyncio
-async def test_a_seed_reaches_the_turns_prompt_env_binding_and_role(teardowns):
+async def test_a_seed_reaches_the_turns_prompt_env_binding_and_role(teardowns, monkeypatch):
+    sessions = _tool_sessions(monkeypatch, {PANTRY_MCP: ["pantry_count"]})
     episode = await _spec(
         {**ITEMS, "env_id": "<env>"},
         {**ALICE, "env_ids": ["<env>"], "role": "<who>", "system_prompt": "You keep the <env>."},
@@ -310,9 +322,11 @@ async def test_a_seed_reaches_the_turns_prompt_env_binding_and_role(teardowns):
     ).start()
 
     turn = await episode.next_turn()
+    async with turn.tools():
+        pass
 
     assert (turn.prompt, turn.system_prompt) == ("Add a crate to the pantry.", "You keep the pantry.")
-    assert (turn.mcp_urls, turn.role) == ({"pantry": "http://127.0.0.1:20031/pantry/mcp"}, "bob@example.com")
+    assert sessions.opened == [(PANTRY_MCP, {"X-Sandbox": PANTRY_MCP, ROLE: "bob@example.com"})]
 
 
 @pytest.mark.asyncio
@@ -596,90 +610,118 @@ async def test_a_cancelled_start_takes_its_run_down_with_it(teardowns):
     assert teardowns.finished == teardowns.started and len(teardowns.finished) == 1
 
 
-class _SandboxedStandIn:
-    """Stands in for the client of a stand-in deployed in a sandbox: runs each command as ``ran <command>``, and
-    records each reply."""
+class _SandboxedProxy:
+    """Stands in for the client of a proxy deployed in a sandbox: offers ``items_add_item`` and ``bash``, answers each
+    action from ``results`` or ran ``<command>``, and records each action and reply."""
 
-    def __init__(self):
-        self.commands = []
+    def __init__(self, results=None):
+        self.results = results or {}
+        self.actions = []
         self.replies = []
 
-    async def run(self, command):
-        self.commands.append(command)
-        return f"ran {command}"
+    async def tools(self, task_id):
+        return [{"name": "items_add_item", "server": "items"}, {"name": "bash", "description": "Run a command."}]
+
+    async def act(self, task_id, action):
+        self.actions.append(action)
+        if action["kind"] == "bash":
+            return self.results.get(action["command"]) or {
+                "kind": "bash", "exit_code": 0, "stdout": f"ran {action['command']}\n", "stderr": "", "timed_out": False}
+        return {"kind": "tool", "content": [{"type": "text", "text": "added"}], "is_error": False}
 
     async def reply(self, task_id, **reply):
         self.replies.append((task_id, reply))
         return True
 
 
-def _sandboxed_turn(stand_in):
-    return episode_run.Turn(agent="alice", step_id="turn", prompt="Add a crate.", system_prompt=None, role=None,
-                            mcp_urls={"items": ITEMS_MCP}, skills=[], shell=True, stand_in=stand_in, task_id="t-1")
+def _sandboxed_turn(proxy):
+    return episode_run.Turn(agent="alice", step_id="turn", prompt="Add a crate.", system_prompt=None, skills=[],
+                            proxy=proxy, task_id="t-1")
 
 
 @pytest.mark.asyncio
-async def test_a_turn_in_the_agents_sandbox_offers_bash_beside_its_envs_tools(monkeypatch):
-    _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]})
-    stand_in = _SandboxedStandIn()
+async def test_a_turn_in_the_agents_sandbox_offers_bash_and_shows_its_output_as_verifiers_does():
+    proxy = _SandboxedProxy({"slow": {"kind": "bash", "stdout": "", "stderr": "", "timed_out": True},
+                             "both": {"kind": "bash", "exit_code": 2, "stdout": "out\n", "stderr": "err\n",
+                                      "timed_out": False}})
 
-    async with _sandboxed_turn(stand_in).tools() as tools:
+    async with _sandboxed_turn(proxy).tools() as tools:
         assert [tool.name for tool in tools.list()] == ["items_add_item", "bash"]
-        assert (await tools.call("bash", {"command": "ls inputs"})).text == "ran ls inputs"
+        assert (await tools.call("bash", {"command": "ls inputs"})).text == "ran ls inputs\n"
+        assert (await tools.call("bash", {"command": "both"})).text == "out\nerr\n"
+        timed_out = await tools.call("bash", {"command": "slow"})
         with pytest.raises(EpisodeError, match="tool 'bash' takes a command string, not 3"):
             await tools.call("bash", {"command": 3})
+        assert (await tools.call("items_add_item", {"name": "crate"})).text == "added"
 
-    assert stand_in.commands == ["ls inputs"]
-
-
-@pytest.mark.asyncio
-async def test_an_env_tool_named_bash_clashes_with_the_sandboxes_own(monkeypatch):
-    _tool_sessions(monkeypatch, {ITEMS_MCP: ["bash"]})
-
-    with pytest.raises(EpisodeError, match="tool 'bash' is offered by env 'items', and the agent's sandbox offers"):
-        async with _sandboxed_turn(_SandboxedStandIn()).tools():
-            pass
+    assert (timed_out.isError, timed_out.text) == (True, "error: the command timed out")
+    assert proxy.actions == [{"kind": "bash", "command": "ls inputs"}, {"kind": "bash", "command": "both"},
+                             {"kind": "bash", "command": "slow"},
+                             {"kind": "tool", "server": "items", "name": "items_add_item",
+                              "arguments": {"name": "crate"}, "timeout_seconds": 600.0}]
 
 
 @pytest.mark.asyncio
-async def test_a_turns_calls_and_its_reply_are_handed_back_as_its_trajectory(monkeypatch):
-    _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]})
-    stand_in = _SandboxedStandIn()
-    turn = _sandboxed_turn(stand_in)
+async def test_a_turn_ends_with_its_reply_as_parts():
+    proxy = _SandboxedProxy()
+    turn = _sandboxed_turn(proxy)
 
-    async with turn.tools() as tools:
-        await tools.call("items_add_item", {"name": "crate"})
-        await tools.call("bash", {"command": "ls"})
     await turn.end("Added a crate.")
+    await turn.end("Again.")
 
-    [(task_id, reply)] = stand_in.replies
-    assert (task_id, reply["text"], reply["tool_call_count"]) == ("t-1", "Added a crate.", 2)
-    spans = reply["trajectory"]
-    assert [(span["name"], span["attributes"]["gen_ai.operation.name"]) for span in spans] == [
-        ("items_add_item", "execute_tool"), ("bash", "execute_tool"), ("turn", "chain")]
-    assert json.loads(spans[0]["attributes"]["gen_ai.prompt"]) == {"input": {"name": "crate"}}
-    assert json.loads(spans[1]["attributes"]["gen_ai.completion"]) == {"output": [{"type": "text", "text": "ran ls"}]}
-    assert json.loads(spans[2]["attributes"]["gen_ai.completion"]) == {
-        "content": [{"type": "text", "text": "Added a crate."}]}
-    assert all(span["start_time"] <= span["end_time"] for span in spans)
+    assert proxy.replies == [("t-1", {"parts": [{"kind": "text", "text": "Added a crate."}]})]
 
 
 @pytest.mark.asyncio
-async def test_a_call_that_raises_is_handed_back_in_the_trajectory_too(monkeypatch):
-    _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]},
-                   raises={"items_add_item": TimeoutError("the env didn't answer")})
-    stand_in = _SandboxedStandIn()
-    turn = _sandboxed_turn(stand_in)
+async def test_a_reply_that_cant_reach_the_proxy_leaves_the_runs_own_failure_to_report(caplog):
+    class _Unreachable(_SandboxedProxy):
+        async def reply(self, task_id, **reply):
+            raise httpx.ConnectError("the sandbox is gone")
+
+    turn = _sandboxed_turn(_Unreachable())
+
+    await turn.end("done")
+
+    assert "its reply didn't reach the proxy: the sandbox is gone" in caplog.text
+
+
+ADD_A_CRATE = {"role": "assistant", "content": "Adding one.", "tool_calls": [
+    {"id": "c1", "type": "function", "function": {"name": "items_add_item", "arguments": '{"name": "crate"}'}}]}
+
+
+@pytest.mark.asyncio
+async def test_recorded_model_calls_are_held_to_the_calls_that_run(teardowns, monkeypatch):
+    _tool_sessions(monkeypatch, {ITEMS_MCP: ["items_add_item"]})
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+    turn = await episode.next_turn()
 
     async with turn.tools() as tools:
-        with pytest.raises(TimeoutError, match="the env didn't answer"):
-            await tools.call("items_add_item", {"name": "crate"})
-    await turn.end("Gave up.")
+        await turn.record_model_call(ADD_A_CRATE, model="qwen", usage={"prompt_tokens": 9, "completion_tokens": 4})
+        with pytest.raises(EpisodeError, match="didn't make this call to 'items_add_item'"):
+            await tools.call("items_add_item", {"name": "box"})
+        with pytest.raises(EpisodeError, match="haven't run"):
+            await turn.end("Added.")
+        await tools.call("items_add_item", {"name": "crate"})
+    await turn.record_model_call("Added a crate.", model="qwen")
+    await turn.end("Added a crate.")
+    assert await episode.result() == {"replies": 1.0}
 
-    [(_, reply)] = stand_in.replies
-    assert reply["tool_call_count"] == 1
-    assert json.loads(reply["trajectory"][0]["attributes"]["gen_ai.completion"]) == {
-        "error": "TimeoutError: the env didn't answer"}
+    [response] = Task.get_instance(episode.id).context["prompt_responses"]
+    stored = json.loads(get_config().get_object_store().get(response["agent_trajectory_object_url"]))
+    assert [(span["name"], span["attributes"]["gen_ai.operation.name"]) for span in stored] == [
+        ("chat", "chat"), ("items_add_item", "execute_tool"), ("chat", "chat"), ("turn", "chain")]
+    assert json.loads(stored[-1]["attributes"]["gen_ai.prompt"]) == {
+        "prompt": "Add a crate.", "system_prompt": "You keep the items."}
+    assert stored[-1]["attributes"]["gen_ai.request.model"] == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_a_model_call_in_a_shape_the_proxy_cant_read_is_refused(teardowns):
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+    turn = await episode.next_turn()
+
+    with pytest.raises(EpisodeError, match="OpenAI chat message, an Anthropic message or a string"):
+        await turn.record_model_call({"role": "assistant", "content": {"not": "readable"}})
 
 
 @pytest.mark.asyncio
@@ -720,16 +762,3 @@ async def test_a_prompts_own_system_prompt_wins_over_the_agents(teardowns):
     episode = await _spec(ITEMS, ALICE, {**TURN, "system_prompt": "Count first."}, REPLIES).start()
 
     assert (await episode.next_turn()).system_prompt == "Count first."
-
-
-@pytest.mark.asyncio
-async def test_a_reply_that_cant_reach_the_stand_in_leaves_the_runs_own_failure_to_report(caplog):
-    class _Unreachable(_SandboxedStandIn):
-        async def reply(self, task_id, **reply):
-            raise httpx.ConnectError("the sandbox is gone")
-
-    turn = _sandboxed_turn(_Unreachable())
-
-    await turn.end("done")
-
-    assert "its reply didn't reach the stand-in: the sandbox is gone" in caplog.text

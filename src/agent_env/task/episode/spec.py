@@ -37,7 +37,7 @@ class EpisodeSpec:
         if found := problems(seeded, outside):
             raise EpisodeError(f"task {task.id!r} can't run as an episode: " + "; ".join(found))
         sandboxed = {name: works_in_sandbox(seeded, name) for name in outside}
-        steps = [_stand_in(step, as_run, sandboxed, turn_timeout) for step, as_run in zip(task.steps, seeded)]
+        steps = [_in_episode(step, as_run, sandboxed, turn_timeout) for step, as_run in zip(task.steps, seeded)]
         return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
 
     async def start(self) -> Episode:
@@ -69,9 +69,9 @@ def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | No
     return outside
 
 
-def _stand_in(step: TaskStep, as_run: TaskStep, sandboxed: dict[str, bool], turn_timeout: float | None) -> TaskStep:
+def _in_episode(step: TaskStep, as_run: TaskStep, sandboxed: dict[str, bool], turn_timeout: float | None) -> TaskStep:
     """The step the episode's copy of the task runs in place of ``step``, judged by ``as_run``, the step as the
-    seed makes it; ``sandboxed`` says, for each outside agent by name, whether its stand-in is deployed in its
+    seed makes it; ``sandboxed`` says, for each outside agent by name, whether its proxy is deployed in its
     sandbox. The copy keeps every step's own fields, which the run seeds."""
     if as_run.type in DEPLOYS and as_run.agent_name in sandboxed:
         return _EpisodeAgentStep(

@@ -1,4 +1,4 @@
-"""An agent installed on a Modal VM's host, played from this machine through the stand-in installed in its place: the
+"""An agent installed on a Modal VM's host, played from this machine through the proxy installed in its place: the
 shape of a task that loads its inputs onto the VM, installs a harness there and checks the outputs it leaves."""
 
 import asyncio
@@ -16,7 +16,7 @@ from tst.util.capabilities import skip_without_remote_sandbox
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_remote_sandbox("modal_vm")]
 
-# An agent the stand-in replaces needs only a card declaring where it works on a VM host.
+# An agent the proxy replaces needs only a card declaring where it works on a VM host.
 REPLACED_SERVER = """
 class _Card:
     def model_dump(self):
@@ -34,9 +34,9 @@ COPY a2a_server.py .
 
 
 @pytest.mark.asyncio
-async def test_an_agent_installed_on_a_vm_host_is_played_through_a_stand_in_installed_in_its_place():
+async def test_an_agent_installed_on_a_vm_host_is_played_through_a_proxy_installed_in_its_place():
     uid = uuid.uuid4().hex[:8]
-    greeting = FileArtifact.put_bytes(id=f"greeting-vm-{uid}", description="stand-in on a VM", filename="greeting.txt",
+    greeting = FileArtifact.put_bytes(id=f"greeting-vm-{uid}", description="proxy on a VM", filename="greeting.txt",
                                       content=b"hello", content_type="text/plain")
     task = Task.from_dict({"id": f"copy-vm-{uid}", "steps": [
         {"id": "vm", "type": "deploy_sandbox", "sandbox_name": "vm", "sandbox_mode": "vm", "sandbox_type": "modal_vm",
@@ -76,6 +76,6 @@ def _replaced(uid: str) -> A2AAgent:
         context = Path(build_dir)
         (context / "a2a_server.py").write_text(REPLACED_SERVER)
         (context / "Dockerfile").write_text(REPLACED_DOCKERFILE)
-        image = DockerImageArtifact.put_context(f"replaced-agent-image-{uid}", description="stand-in on a VM",
+        image = DockerImageArtifact.put_context(f"replaced-agent-image-{uid}", description="proxy on a VM",
                                                 context_path=str(context), dockerfile_path="Dockerfile", platform=None)
     return A2AAgent.put(id=f"replaced-agent-{uid}", docker_image_artifact=image)

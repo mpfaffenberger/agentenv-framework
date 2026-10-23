@@ -93,7 +93,7 @@ def _build_param_resolvers(
         if place is None:
             raise KeyError(
                 f"agent declares required_param {name!r}, which only an install in another agent's place "
-                "(the step's `stand_in` param) gives"
+                "(the step's `proxy` param) gives"
             )
         return place[name]
 
@@ -240,9 +240,9 @@ class InstallAgentTaskStep(TaskStep):
         if problem := _install_problem(agent):
             raise RuntimeError(problem)
         place = None
-        if stand_in := self.step_param_overrides(context).get("stand_in"):
+        if proxy := self.step_param_overrides(context).get("proxy"):
             place = await self._place_of(sandbox, agent)
-            agent = A2AAgent.get(stand_in)
+            agent = A2AAgent.get(proxy)
             if problem := _install_problem(agent):
                 raise RuntimeError(problem)
 
@@ -378,15 +378,15 @@ class InstallAgentTaskStep(TaskStep):
         return "".join(f"{name}={shlex.quote(value)}\n" for name, value in env.items())
 
     async def _place_of(self, sandbox, agent: A2AAgent) -> dict[str, str]:
-        """Where ``agent``, which a stand-in replaces, works on the VM host and as which user: its install/v1 params
+        """Where ``agent``, which a proxy replaces, works on the VM host and as which user: its install/v1 params
         ``workdir_host`` and ``user_host``, templates of ``{agent_name}`` as its install commands are."""
         if self.container_name is not None:
             raise RuntimeError(
-                f"install_agent '{self.id}': a stand-in replaces an agent installed on the VM host, not in a container"
+                f"install_agent '{self.id}': a proxy replaces an agent installed on the VM host, not in a container"
             )
         if sandbox.ON_THIS_MACHINE:
             raise RuntimeError(
-                f"install_agent '{self.id}': a stand-in isn't installed on a sandbox that runs on this machine, where "
+                f"install_agent '{self.id}': a proxy isn't installed on a sandbox that runs on this machine, where "
                 "its player's commands would run here; deploy the sandbox on a remote VM provider"
             )
         logger.info(f"Loading agent image {agent.docker_image_artifact.image_name} onto VM (to read where it works)...")
@@ -397,7 +397,7 @@ class InstallAgentTaskStep(TaskStep):
         if not all(isinstance(value, str) and value for value in place.values()):
             raise RuntimeError(
                 f"Agent {agent.id} v{agent.version} install/v1 params don't say where it works on the VM host: a "
-                f"stand-in installed in its place needs '{WORKDIR_HOST_KEY}' and '{USER_HOST_KEY}'"
+                f"proxy installed in its place needs '{WORKDIR_HOST_KEY}' and '{USER_HOST_KEY}'"
             )
         return {name: value.format(agent_name=self.agent_name) for name, value in place.items()}
 

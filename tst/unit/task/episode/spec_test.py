@@ -89,12 +89,12 @@ def test_the_copy_stands_in_for_the_outside_agents_steps_and_keeps_everything_el
     ]
     assert [copy.steps[i] is task.steps[i] for i in range(len(task.steps))] == [
         True, True, False, True, True, True, True]
-    for original, stand_in in zip(task.steps, copy.steps):
-        assert (stand_in.id, stand_in.version, stand_in.depends_on, stand_in.fail_task_on_error) == (
+    for original, played in zip(task.steps, copy.steps):
+        assert (played.id, played.version, played.depends_on, played.fail_task_on_error) == (
             original.id, original.version, original.depends_on, original.fail_task_on_error)
 
 
-def test_the_outside_agents_deploy_runs_in_a_stand_in_unseeded_and_round_trips():
+def test_the_outside_agents_deploy_runs_with_a_proxy_unseeded_and_round_trips():
     task = _portsim()
     agent = EpisodeSpec.from_task(task, seed=SEED)._copy.steps[2]
 
@@ -153,12 +153,12 @@ OUTSIDE_THE_SANDBOX = {
 
 
 @pytest.mark.parametrize(("extra", "replace"), IN_THE_SANDBOX.values(), ids=IN_THE_SANDBOX.keys())
-def test_a_task_using_the_outside_agents_sandbox_deploys_its_stand_in_there(extra, replace):
+def test_a_task_using_the_outside_agents_sandbox_deploys_its_proxy_there(extra, replace):
     assert EpisodeSpec.from_task(_portsim(*extra, **replace))._copy.steps[2].sandboxed
 
 
 @pytest.mark.parametrize(("extra", "replace"), OUTSIDE_THE_SANDBOX.values(), ids=OUTSIDE_THE_SANDBOX.keys())
-def test_a_task_using_only_the_outside_agents_envs_serves_its_stand_in_here(extra, replace):
+def test_a_task_using_only_the_outside_agents_envs_serves_its_proxy_here(extra, replace):
     assert not EpisodeSpec.from_task(_portsim(*extra, **replace))._copy.steps[2].sandboxed
 
 
@@ -173,7 +173,7 @@ REFUSED = {
     "deploy_human_agent": (({"id": "human", "type": "deploy_human_agent", **AT_THE_AGENT},), {"agent": None},
                            "step 'human': deploy_human_agent deploys 'default-agent', which is played from outside"),
     "an install into a container": ({}, {"agent": {**INSTALL, "container_name": "task"}},
-                                    "step 'agent': an outside agent's stand-in replaces an agent installed on the VM "
+                                    "step 'agent': an outside agent's proxy replaces an agent installed on the VM "
                                     "host, not in container 'task'"),
     "parts": ({}, {"play": {**PLAY, "prompt": None, "parts": [{"kind": "text", "text": "Plan."}]}},
               "step 'play': an outside agent's prompt can't have parts, only a text prompt"),

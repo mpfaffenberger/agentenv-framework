@@ -1,4 +1,4 @@
-"""The agents bundle's stand-in: its card, how it installs on a VM's host, and how the episode writes it."""
+"""The agents bundle's proxy: its card, how it installs on a VM's host, and how the episode writes it."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ import subprocess
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.bundle.installed import write_installed
-from agent_env.task.episode.steps import STAND_IN_AGENT_ID
+from agent_env.task.episode.steps import PROXY_AGENT_ID
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 
-from tst.unit.agents.stand_in.agent import AGENT_DIR, a2a_server
+from tst.unit.agents.proxy.agent import AGENT_DIR, a2a_server
 
 
 def _extensions() -> dict:
@@ -18,9 +18,9 @@ def _extensions() -> dict:
     return {ext["uri"]: ext for ext in card["capabilities"]["extensions"]}
 
 
-def test_the_card_offers_the_driver_and_a_host_install_only():
+def test_the_card_offers_the_proxy_and_a_host_install_only():
     extensions = _extensions()
-    assert {"urn:agentenv:driver/v1", "urn:agentenv:mcp-config/v1", "urn:agentenv:trajectory/v1",
+    assert {"urn:agentenv:proxy/v1", "urn:agentenv:mcp-config/v1", "urn:agentenv:trajectory/v1",
             "urn:agentenv:install/v1"} <= set(extensions)
     params = extensions["urn:agentenv:install/v1"]["params"]
     assert params["install_commands_host"] and not params.get("install_commands")
@@ -48,9 +48,9 @@ def test_the_image_works_in_app_as_agent():
 
 
 def test_the_episode_writes_it_from_the_bundle_taking_no_credentials(local_stores, cli_routing):
-    version = write_installed(STAND_IN_AGENT_ID)
-    agent = A2AAgent.get(STAND_IN_AGENT_ID)
+    version = write_installed(PROXY_AGENT_ID)
+    agent = A2AAgent.get(PROXY_AGENT_ID)
 
     assert (agent.version, agent.metadata) == (version, {"takes_credentials": False})
     assert agent.docker_image_artifact.context_only
-    assert write_installed(STAND_IN_AGENT_ID) == version
+    assert write_installed(PROXY_AGENT_ID) == version

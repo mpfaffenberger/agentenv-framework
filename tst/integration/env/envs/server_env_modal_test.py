@@ -98,7 +98,6 @@ async def test_an_episodes_env_on_modal_is_played_from_this_machine_and_no_endin
     try:
         played = await start(spec)
         turn = await played.next_turn()
-        assert turn.mcp_urls[env.id].startswith("https://")
         async with turn.tools() as tools:
             await tools.call("items_add_item", {"item": "crate"})
             assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"

@@ -26,7 +26,7 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact
 from agent_env.artifact.store import reset_artifact_store
-from agent_env.config import configure, reset_config, set_image_store
+from agent_env.config import configure, get_config, reset_config, set_image_store
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
@@ -208,13 +208,17 @@ async def verify(mcp_url):
 """
 
 
+ADD_A_CRATE = {"role": "assistant", "content": "Adding one.", "tool_calls": [
+    {"id": "c1", "type": "function", "function": {"name": "items_add_item", "arguments": '{"item": "crate"}'}},
+    {"id": "c2", "type": "function", "function": {"name": "items_whoami", "arguments": "{}"}}]}
+
+
 @pytest.mark.asyncio
 async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(local_stack, tmp_path):
     """A trainer's view of a seeded task: the env deployed and loaded and the echo agent prompted around the outside
-    agent, which plays its turn through the env's tools as its role through a stand-in served in this process; its
-    reply recorded and
-    scored under the verifier's step; and every episode, played, not played, abandoned or forgotten past its turn's
-    deadline, leaving nothing behind."""
+    agent, which plays its turn through the env's tools as its role through a proxy served in this process, which
+    records the model's calls and the tools they ran; its reply scored under the verifier's step; and every episode,
+    played, not played, abandoned or forgotten past its turn's deadline, leaving nothing behind."""
     uid = uuid.uuid4().hex[:8]
     env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
                            environment_name="items", env_provider_type="server")
@@ -237,15 +241,18 @@ async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(loc
 
     async def play(episode, add):
         turn = await episode.next_turn()
-        assert turn.prompt == "Add a crate." and turn.role == "alice@example.com"
+        assert turn.prompt == "Add a crate."
         assert [(agent["agent_name"], bool(agent["sandbox_id"]))
                 for agent in Task.get_instance(episode.id).context["deployed_agents"]] == [("policy", False),
                                                                                             ("echo", True)]
         if add:
             async with turn.tools() as tools:
-                assert {"items_add_item", "items_whoami"} <= {tool.name for tool in tools.list()}
+                names = {tool.name for tool in tools.list()}
+                assert {"items_add_item", "items_whoami"} <= names and "bash" not in names
+                await turn.record_model_call(ADD_A_CRATE, model="policy-model")
                 await tools.call("items_add_item", {"item": "crate"})
                 assert json.loads((await tools.call("items_whoami")).text)["role"] == "alice@example.com"
+            await turn.record_model_call("Added a crate.", model="policy-model")
         await turn.end("Added a crate." if add else None)
         return await episode.result()
 
@@ -258,6 +265,9 @@ async def test_a_tasks_agent_is_played_from_a_loop_of_ones_own_as_an_episode(loc
     assert [agent["agent_name"] for agent in record.context["deployed_agents"]] == ["policy", "echo"]
     replies = {response["step_id"]: response["response"] for response in record.context["prompt_responses"]}
     assert replies["play"] == "Added a crate." and replies["ask-echo"].startswith("Echo:")
+    [play] = [response for response in record.context["prompt_responses"] if response["step_id"] == "play"]
+    assert [span["name"] for span in _stored(play["agent_trajectory_object_url"])] == [
+        "chat", "items_add_item", "items_whoami", "chat", "turn"]
 
     abandoned = await spec.start()
     await abandoned.next_turn()
@@ -305,40 +315,66 @@ def _items_artifact(uid: str) -> EnvironmentArtifact:
 
 
 @pytest.mark.asyncio
-async def test_an_agent_that_works_in_its_sandbox_is_played_through_a_stand_in_deployed_there(local_stack, tmp_path):
-    """A task that loads files into its agent and checks what the agent left there: the agent is never deployed,
-    a stand-in is, in its place, and the loop's ``bash`` runs in it, as its user and in its folder, with no model
-    credentials; the check scores what the commands left, and nothing is left running."""
+async def test_an_agent_that_works_in_its_sandbox_is_played_through_a_proxy_deployed_there(local_stack, tmp_path):
+    """A task that loads files into its agent, gives it an env, and checks what the agent left in both: the agent is
+    never deployed, a proxy is, in its place, and every call the loop makes runs in it, ``bash`` as the agent's user in
+    its folder with no model credentials, the env's tools as its role; the checks score what the calls left, the proxy
+    records the turn, and nothing is left running."""
     uid = uuid.uuid4().hex[:8]
-    greeting = FileArtifact.put_bytes(id=f"greeting-{uid}", description="stand-in e2e", filename="greeting.txt",
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    verify = FileArtifact.put_bytes(id=f"verify-crate-{uid}", description="proxy e2e", filename="verify.py",
+                                    content=VERIFY_CRATE.encode(), content_type="text/x-python")
+    greeting = FileArtifact.put_bytes(id=f"greeting-{uid}", description="proxy e2e", filename="greeting.txt",
                                       content=b"hello", content_type="text/plain")
     task = Task.from_dict({"id": f"copy-{uid}", "steps": [
-        {"id": "agent", "type": "deploy_agent", "agent_name": "solver", "a2a_agent_id": f"never-deployed-{uid}"},
+        {"id": "env", "type": "deploy_env", "env_id": env.id},
+        {"id": "agent", "type": "deploy_agent", "agent_name": "solver", "a2a_agent_id": f"never-deployed-{uid}",
+         "env_ids": [env.id], "role": "bob@example.com"},
         {"id": "load", "type": "load_artifact", "agent_name": "solver", "artifact_id": greeting.id,
          "destination_path": "/app/inputs"},
         {"id": "solve", "type": "prompt_agent", "agent_name": "solver", "prompt_id": "solve",
-         "prompt": "Copy inputs/greeting.txt to outputs/answer.txt.", "poll_interval_seconds": 0.5},
+         "prompt": "Copy inputs/greeting.txt to outputs/answer.txt, and add a crate.", "poll_interval_seconds": 0.5},
         {"id": "check", "type": "verify_sandbox", "agent_name": "solver", "criteria": [
             {"type": "probe_file_contains", "criterion": "the greeting is copied", "paths": ["outputs/answer.txt"],
              "expected": "^hello$"}]},
+        {"id": "crate", "type": "env_outcome_verifier", "env_id": env.id, "file_artifact_id": verify.id,
+         "verifier_id": "crate"},
     ]})
+    copy = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": json.dumps(
+            {"command": "mkdir -p outputs && cp inputs/greeting.txt outputs/answer.txt"})}},
+        {"id": "c2", "type": "function", "function": {"name": "items_add_item", "arguments": '{"item": "crate"}'}}]}
 
     episode = await EpisodeSpec.from_task(task).start()
     turn = await episode.next_turn()
     async with turn.tools() as tools:
-        assert [tool.name for tool in tools.list()] == ["bash"]
+        names = [tool.name for tool in tools.list()]
+        assert names[0] == "bash" and {"items_add_item", "items_whoami"} <= set(names)
         assert (await tools.call("bash", {"command": "pwd; whoami; cat inputs/greeting.txt"})).text == (
             "/app\nagent\nhello")
         assert (await tools.call("bash", {"command": "env | grep -c ^LITELLM_ || true"})).text == "0\n"
+        assert json.loads((await tools.call("items_whoami")).text)["role"] == "bob@example.com"
+        await turn.record_model_call(copy, model="solver-model", usage={"prompt_tokens": 12, "completion_tokens": 5})
         await tools.call("bash", {"command": "mkdir -p outputs && cp inputs/greeting.txt outputs/answer.txt"})
-    await turn.end("Copied.")
+        await tools.call("items_add_item", {"item": "crate"})
+    await turn.record_model_call("Copied, and added a crate.", model="solver-model")
+    await turn.end("Copied, and added a crate.")
 
-    assert await episode.result() == {"check": 1.0}
+    assert await episode.result() == {"check": 1.0, "crate": 1.0}
     record = Task.get_instance(episode.id)
     [solver] = record.context["deployed_agents"]
     assert solver["agent_name"] == "solver" and solver["sandbox_id"]
     [response] = record.context["prompt_responses"]
-    assert (response["response"], response["tool_call_count"]) == ("Copied.", 3)
-    assert response["agent_trajectory_object_url"]
+    assert (response["response"], response["tool_call_count"]) == ("Copied, and added a crate.", 5)
+    stored = _stored(response["agent_trajectory_object_url"])
+    assert [span["name"] for span in stored] == [
+        "bash", "bash", "items_whoami", "chat", "bash", "items_add_item", "chat", "turn"]
+    assert stored[-1]["attributes"]["gen_ai.request.model"] == "solver-model"
     assert list((tmp_path / "sandboxes").glob("agent-env-*")) == []
-    assert _docker("ps", "-aq", "--filter", f"name=^/agent-{solver['sandbox_id']}$").stdout.strip() == ""
+    for entry in (*record.context["deployed_agents"], *record.context["deployed_envs"]):
+        assert _docker("ps", "-aq", "--filter", f"name=^/agent-{entry['sandbox_id']}$").stdout.strip() == ""
+
+
+def _stored(url: str) -> list[dict]:
+    return json.loads(get_config().get_object_store().get(url))
