@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import subprocess
@@ -11,7 +12,7 @@ import pytest
 import uvicorn
 from starlette.testclient import TestClient
 
-from agentenv_protocol import EnvironmentCard, ToolContext, create_fastmcp_app, tool
+from agentenv_protocol import EnvironmentCard, ToolContext, ToolSession, create_fastmcp_app, tool
 from agentenv_protocol.a2a_agent import proxy
 from agentenv_protocol.a2a_agent.proxy import ProxyAgent
 
@@ -267,6 +268,53 @@ def test_a_tool_action_calls_the_env_with_the_headers_registered_for_the_proxy(c
     assert failed["is_error"] is True
 
 
+def test_a_tool_actions_deadline_covers_connecting_to_its_server(client):
+    with socket.socket() as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        _register(client, f"http://127.0.0.1:{silent.getsockname()[1]}/mcp")
+        task_id = _send(client, "go")
+
+        started = time.monotonic()
+        result = _done(client, task_id, "t", {"kind": "tool", "server": "items", "name": "add_item",
+                                              "timeout_seconds": 0.5})
+
+    assert result["is_error"] and "timed out after 0.5s" in result["content"][0]["text"]
+    assert time.monotonic() - started < 5
+
+
+def test_a_turns_actions_share_one_connection_to_each_env_server_which_closes_with_the_turn(client, env, monkeypatch):
+    opened, closed, results = [], [], []
+    open_session, close_session = ToolSession.open, ToolSession.close
+
+    async def opening(self):
+        opened.append(self)
+        await asyncio.sleep(0.2)
+        return await open_session(self)
+
+    async def closing(self):
+        if self._client is not None:
+            closed.append(self)
+        await close_session(self)
+
+    monkeypatch.setattr(ToolSession, "open", opening)
+    monkeypatch.setattr(ToolSession, "close", closing)
+    _register(client, env[1])
+    task_id = _send(client, "go")
+
+    calls = [threading.Thread(target=lambda n=n: results.append(_done(
+        client, task_id, f"w{n}", {"kind": "tool", "server": "items", "name": "whoami"}))) for n in range(3)]
+    for call in calls:
+        call.start()
+    for call in calls:
+        call.join()
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "done"}])
+    _settled(client, task_id)
+
+    assert [result["is_error"] for result in results] == [False] * 3
+    assert len(opened) == 1 and closed == opened
+
+
 def test_a_bash_action_runs_in_the_proxys_folder_and_returns_a_structured_result(client, tmp_path):
     (tmp_path / "inputs").mkdir()
     task_id = _send(client, "go")
@@ -366,6 +414,29 @@ def test_recorded_model_calls_are_checked_against_the_actions_that_run(client, e
             spans[0]["attributes"]["gen_ai.usage.output_tokens"]) == ("qwen", 12, 7)
     assert _attrs(spans[2], "gen_ai.prompt") == {"input": {"item": "crate"}}
     assert task["status"]["message"]["parts"][1]["data"]["usage"]["tool_call_count"] == 2
+
+
+def test_two_model_calls_recorded_at_once_are_held_one_after_the_other(client, monkeypatch):
+    listing, statuses = ProxyAgent._tools, []
+
+    async def slow(self, turn):
+        await asyncio.sleep(0.3)
+        return await listing(self, turn)
+
+    def record(command: str) -> None:
+        message = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": command, "type": "function", "function": {"name": "bash", "arguments": json.dumps({"command": command})}}]}
+        statuses.append(_proxy(client, "record", task_id=task_id, message=message).status_code)
+
+    monkeypatch.setattr(ProxyAgent, "_tools", slow)
+    task_id = _send(client, "go")
+    records = [threading.Thread(target=record, args=(command,)) for command in ("true", "false")]
+    for thread in records:
+        thread.start()
+    for thread in records:
+        thread.join()
+
+    assert sorted(statuses) == [200, 409]
 
 
 @pytest.mark.parametrize(("message", "content"), [
