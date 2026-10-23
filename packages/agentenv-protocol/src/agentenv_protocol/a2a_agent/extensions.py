@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -299,6 +299,11 @@ class ProxyNextRequest(ExtensionRequest):
     after: int = Field(default=0, ge=0)
 
 
+class ProxyTextPart(ExtensionRequest):
+    kind: Literal["text"] = "text"
+    text: str
+
+
 class ProxySkill(ExtensionResponse):
     name: str
     description: str
@@ -308,7 +313,7 @@ class ProxySkill(ExtensionResponse):
 class ProxyTurn(ExtensionResponse):
     task_id: str
     context_id: str
-    text: str
+    parts: list[ProxyTextPart]
     system_prompt: str | None = None
     skills: list[ProxySkill] = Field(default_factory=list)
 
@@ -318,38 +323,86 @@ class ProxyNextResponse(ExtensionResponse):
     turns: list[ProxyTurn]
 
 
+class ProxyToolsRequest(ExtensionRequest):
+    token: str
+    task_id: str
+
+
+class ProxyTool(ExtensionResponse):
+    name: str
+    description: str | None = None
+    input_schema: dict[str, Any] | None = None
+    server: str | None = None  # the env server that offers it; none for bash
+
+
+class ProxyToolsResponse(ExtensionResponse):
+    tools: list[ProxyTool]
+
+
+class ProxyToolAction(ExtensionRequest):
+    kind: Literal["tool"]
+    server: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: float | None = Field(default=None, gt=0)
+
+
+class ProxyBashAction(ExtensionRequest):
+    kind: Literal["bash"]
+    command: str
+    timeout_seconds: float | None = Field(default=None, gt=0)
+
+
+class ProxyActRequest(ExtensionRequest):
+    token: str
+    task_id: str
+    action_id: str = Field(min_length=1, max_length=128)
+    action: Annotated[ProxyToolAction | ProxyBashAction, Field(discriminator="kind")]
+
+
+class ProxyResultRequest(ExtensionRequest):
+    token: str
+    action_id: str
+
+
+class ProxyBashResult(ExtensionResponse):
+    kind: Literal["bash"] = "bash"
+    exit_code: int | None  # none when the command was stopped
+    stdout: str
+    stderr: str
+    timed_out: bool
+
+
+class ProxyToolResult(ExtensionResponse):
+    kind: Literal["tool"] = "tool"
+    content: list[dict[str, Any]]
+    is_error: bool
+
+
+class ProxyActionState(ExtensionResponse):
+    done: bool
+    result: Annotated[ProxyBashResult | ProxyToolResult, Field(discriminator="kind")] | None = None
+
+
+class ProxyRecordRequest(ExtensionRequest):
+    token: str
+    task_id: str
+    message: str | dict[str, Any]
+    model: str | None = None
+    usage: dict[str, Any] | None = None
+
+
 class ProxyReplyRequest(ExtensionRequest):
     token: str
     task_id: str
-    text: str | None = None
+    parts: list[ProxyTextPart] | None = Field(default=None, min_length=1)
     error: str | None = None
-    trajectory: list[dict[str, Any]] = Field(default_factory=list)
-    tool_call_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
-    def _text_or_error(self) -> ProxyReplyRequest:
-        if (self.text is None) == (self.error is None):
-            raise ValueError("a reply carries exactly one of text and error")
+    def _parts_or_error(self) -> ProxyReplyRequest:
+        if (self.parts is None) == (self.error is None):
+            raise ValueError("a reply carries exactly one of parts and error")
         return self
-
-
-class ProxyExecRequest(ExtensionRequest):
-    token: str
-    command: str
-
-
-class ProxyExecResponse(ExtensionResponse):
-    exec_id: str
-
-
-class ProxyOutputRequest(ExtensionRequest):
-    token: str
-    exec_id: str
-
-
-class ProxyOutputResponse(ExtensionResponse):
-    done: bool
-    output: str | None = None
 
 
 def _tuple(values: Iterable[str]) -> tuple[str, ...]:
@@ -1234,7 +1287,7 @@ INSTALL_V1 = ExtensionDefinition(
 
 PROXY_V1 = ExtensionDefinition(
     uri="urn:agentenv:proxy/v1",
-    description="Hand the agent's turns to a driver outside its sandbox, and run the driver's commands where the agent works.",
+    description="Hand the agent's turns to a driver outside its sandbox, and run the driver's actions where the agent works.",
     endpoint="/ext/proxy",
     core_operations={
         "claim": _op("claim", "POST", "/ext/proxy/claim", RUNTIME, request_model=ProxyClaimRequest),
@@ -1242,15 +1295,20 @@ PROXY_V1 = ExtensionDefinition(
             "next", "POST", "/ext/proxy/next", RUNTIME,
             request_model=ProxyNextRequest, response_model=ProxyNextResponse,
         ),
+        "tools": _op(
+            "tools", "POST", "/ext/proxy/tools", RUNTIME,
+            request_model=ProxyToolsRequest, response_model=ProxyToolsResponse,
+        ),
+        "act": _op(
+            "act", "POST", "/ext/proxy/act", RUNTIME,
+            request_model=ProxyActRequest, response_model=ProxyActionState,
+        ),
+        "result": _op(
+            "result", "POST", "/ext/proxy/result", RUNTIME,
+            request_model=ProxyResultRequest, response_model=ProxyActionState,
+        ),
+        "record": _op("record", "POST", "/ext/proxy/record", RUNTIME, request_model=ProxyRecordRequest),
         "reply": _op("reply", "POST", "/ext/proxy/reply", RUNTIME, request_model=ProxyReplyRequest),
-        "exec": _op(
-            "exec", "POST", "/ext/proxy/exec", RUNTIME,
-            request_model=ProxyExecRequest, response_model=ProxyExecResponse,
-        ),
-        "output": _op(
-            "output", "POST", "/ext/proxy/output", RUNTIME,
-            request_model=ProxyOutputRequest, response_model=ProxyOutputResponse,
-        ),
     },
 )
 
