@@ -6,8 +6,9 @@ and the others go on. Each run's sandboxes are torn down as it ends, unless ``ke
 SIGTERM cancels the runs: each one that started is marked cancelled and torn down, and a second one stops the
 teardown. A bundle's evals run only the bundle's own tasks for now, so one naming a store task is refused
 before anything is written, and so is a deploy its sandbox provider can't serve (``preflight``). The infra envs a
-gateway deploy on the local provider needs are built once the writes are done, before any task starts. A dry run
-makes every check the run makes before its first task, and writes, builds and runs nothing.
+gateway deploy on the local provider needs are set up once the writes are done, before any task starts: pulled from
+their published images, or built. A dry run makes every check the run makes before its first task, and writes, builds
+and runs nothing.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.env.bootstrap import InfraBuild, ensure_default_envs
+from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
@@ -36,7 +37,7 @@ from agent_env.task_step.context import TaskStepContext
 from .installed import installed_bundles
 from .materialize import Materialization, Materialized, materialize
 from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
-from .plan import Plan, Write, plan_bundle
+from .plan import AliasUse, Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
 from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle
 
@@ -152,7 +153,7 @@ class DryRun:
     materialization: Materialization  # each write at the version it would leave, and why
     runs: tuple[BundleEntry, ...]  # the tasks that would run, each once, in the plan's order
     skipped: tuple[BundleEntry, ...]  # the tasks no eval names, which running every eval leaves out
-    infra: tuple[InfraBuild, ...] = ()  # the infra envs the run would build first
+    infra: tuple[InfraSetup, ...] = ()  # the infra envs the run would set up first
     built_here: frozenset[str] = frozenset()  # the images the run would build on this machine, for its deploys here
 
     def path(self, entry: BundleEntry) -> str:
@@ -167,6 +168,9 @@ class DryRun:
             f"{_label(plan, done.write)} v{done.version}: "
             + ("pulled from its registry, its tag pinned to a digest when it's written"
                if isinstance(done.write.source, ReferencedImage)
+               else f"{plan.published[done.write.id].ref}, published for its sources, which each deploy pulls by its "
+                    "digest, or builds from its build context when it can't"
+               if done.write.id in plan.published
                else "a build context, built with docker on this machine"
                if done.write.id in self.built_here
                else "a build context, which each deploy builds where it runs, for its sandbox's platform")
@@ -225,6 +229,8 @@ def run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
+        for use in plan.aliases.values():
+            say(_aliased(use))
         materialization = materialize(
             plan,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -273,6 +279,8 @@ def dry_run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox)
+        for use in plan.aliases.values():
+            say(_aliased(use))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
@@ -449,6 +457,14 @@ def _progress(on_progress: Callable[[str], None] | None) -> Callable[[str], None
 def _task_run_command(ref: Reference) -> str:
     version = "" if ref.version is None else f" --version {ref.version}"
     return f"agent-env task run --id {shlex.quote(ref.id)}{version}"
+
+
+def _aliased(use: AliasUse) -> str:
+    """Which agent an alias the run names is: the one an installed bundle gives it, or the store's of its id."""
+    if use.store_version is None:
+        return f"{use.alias} → {use.target_id} (the alias {use.declared_by} gives it)"
+    return (f"{use.alias} → the store's agent {use.alias!r} v{use.store_version}, which shadows the alias "
+            f"{use.declared_by} gives {use.target_id}")
 
 
 def _written(plan: Plan, done: Materialized) -> str:
