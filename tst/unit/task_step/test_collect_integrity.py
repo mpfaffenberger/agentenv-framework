@@ -125,3 +125,32 @@ async def test_a_cancel_mid_upload_leaves_the_file_to_the_upload(caplog, monkeyp
     assert uploaded == [src]
     assert "Uploading collected /app/artifact/a.bin finished after its caller was cancelled" in caplog.text
     assert list(tmp_path.iterdir()) == []
+
+
+class _BufferedOnlySandbox:
+    """A sandbox with exec_with_output and no streaming exec."""
+    mode = "container"
+    def __init__(self, src: bytes):
+        self._src = src
+    async def exec_with_output(self, *args):
+        if "base64" in args[-1]:
+            return (0, base64.encodebytes(self._src).decode(), "")  # 76-col wrapped, like base64(1)
+        return (0, f"{len(self._src)}\n", "")
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_without_streaming_exec_collects_over_buffered_exec():
+    src = bytes(range(256)) * 40
+    uploaded = {}
+
+    class _Store:
+        def put_object_file(self, **kw):
+            with open(kw["file_path"], "rb") as fh:
+                uploaded["bytes"] = fh.read()
+            return "s3://bucket/ok"
+
+    step = CollectArtifactsTaskStep(id="collect", version=None)
+    out = await step._collect_file(_BufferedOnlySandbox(src), None, "/app/artifact/out.bin", "out.bin",
+                                   _Store(), "uid", 1, "application/octet-stream")
+    assert out == "s3://bucket/ok"
+    assert uploaded["bytes"] == src

@@ -467,7 +467,8 @@ class CollectArtifactsTaskStep(TaskStep):
         base64-encode in the sandbox (raw binary over a websocket exec transport is
         silently dropped; ASCII survives), stream stdout + decode incrementally to
         a temp file (bounds memory), then multipart-upload. stderr is drained in
-        parallel so the shared output pump can't backpressure-stall."""
+        parallel so the shared output pump can't backpressure-stall. A sandbox with
+        only buffered ``exec_with_output`` reads the encoding in one piece instead."""
         import base64
         bash_cmd = f"base64 < {shlex.quote(source_path)}"
         args = _exec_args(sandbox, container, ("bash", "-c", bash_cmd))
@@ -478,30 +479,37 @@ class CollectArtifactsTaskStep(TaskStep):
             with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{object_name.replace('/', '_')}") as tmp:
                 local_path = tmp.name
 
-            process = await sandbox.exec(*args)
-            stderr_task = asyncio.create_task(process.stderr.read())
-            stdout = process.stdout
-            with open(local_path, "wb") as fh:
-                if hasattr(stdout, "__aiter__"):
-                    # Async-iterable stdout (websocket exec): stream, decoding 4-char-aligned base64.
-                    pending = bytearray()
-                    async for chunk in stdout:
-                        pending += chunk.translate(None, b"\r\n")  # strip 76-col wrap
-                        n = (len(pending) // 4) * 4
-                        if n:
-                            fh.write(base64.b64decode(pending[:n]))
-                            del pending[:n]
-                    if pending:
-                        fh.write(base64.b64decode(pending))
-                else:
-                    # Modal stdout has read() but no __aiter__: read all, decode once.
-                    data = (await stdout.read()).translate(None, b"\r\n")
-                    fh.write(base64.b64decode(data))
-            exit_code = await process.wait()
-            try:
-                await stderr_task
-            except Exception:
-                pass
+            if not hasattr(sandbox, "exec"):
+                # A sandbox with only buffered exec returns the whole encoding at once.
+                exit_code, encoded, _ = await sandbox.exec_with_output(*args)
+                if exit_code == 0:
+                    with open(local_path, "wb") as fh:
+                        fh.write(base64.b64decode(encoded.translate({ord("\r"): None, ord("\n"): None})))
+            else:
+                process = await sandbox.exec(*args)
+                stderr_task = asyncio.create_task(process.stderr.read())
+                stdout = process.stdout
+                with open(local_path, "wb") as fh:
+                    if hasattr(stdout, "__aiter__"):
+                        # Async-iterable stdout (websocket exec): stream, decoding 4-char-aligned base64.
+                        pending = bytearray()
+                        async for chunk in stdout:
+                            pending += chunk.translate(None, b"\r\n")  # strip 76-col wrap
+                            n = (len(pending) // 4) * 4
+                            if n:
+                                fh.write(base64.b64decode(pending[:n]))
+                                del pending[:n]
+                        if pending:
+                            fh.write(base64.b64decode(pending))
+                    else:
+                        # Modal stdout has read() but no __aiter__: read all, decode once.
+                        data = (await stdout.read()).translate(None, b"\r\n")
+                        fh.write(base64.b64decode(data))
+                exit_code = await process.wait()
+                try:
+                    await stderr_task
+                except Exception:
+                    pass
             if exit_code != 0:
                 raise RuntimeError(f"base64 read failed for {source_path} (exit {exit_code})")
 
