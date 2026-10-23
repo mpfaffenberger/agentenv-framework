@@ -482,15 +482,16 @@ class _Planner:
         self._check_writers()
         self._check_loops()
         selected_tasks, selected_evals = self._selection(tasks, evals)
-        return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, aliases)
+        return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, aliases, override)
 
     def plan_entities(self, ids: Sequence[str]) -> Plan:
         self._check_writers()
         self._check_loops()
-        return self._planned(self._select_entities(ids), [], [], {})
+        return self._planned(self._select_entities(ids), [], [], {}, None)
 
     def _planned(self, roots: list[ResolvedEntry], selected_tasks: list[ResolvedEntry],
-                 selected_evals: list[ResolvedEntry], aliases: dict[str, AliasUse]) -> Plan:
+                 selected_evals: list[ResolvedEntry], aliases: dict[str, AliasUse],
+                 override: AgentOverride | None) -> Plan:
         closure = self._closure(roots)
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
