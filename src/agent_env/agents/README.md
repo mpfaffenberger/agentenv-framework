@@ -43,6 +43,24 @@ its id, `@local/agentenv-framework/agents/codex`. It calls the `[model]` endpoin
 needs `[model] default` (or the `agent` role) set. It declares `install/v1` too, into a container or onto a `vm`
 sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions it implements.
 
+`agents/gemini/` runs Google's [Gemini CLI](https://github.com/google-gemini/gemini-cli) behind the protocol's A2A
+agent framework: each turn is one `gemini -p` run, resumed in the context's Gemini session, the task env's MCP servers
+go to the run's own settings, and its stream-json events are the turn's trajectory. Name it as `gemini`, its alias, or
+by its id, `@local/agentenv-framework/agents/gemini`. It calls the `[model]` endpoint's Gemini passthrough,
+`<base>/gemini`, which a LiteLLM gateway serves, through a proxy in the agent that adds the run's attribution; a model
+named with a provider prefix, such as `vertex_ai/...`, goes to `<base>/v1/chat/completions` instead. It takes its
+model from the prompt, so its smoke task needs `[model] default` (or the `agent` role) set. It declares `install/v1`
+too, into a container or onto a `vm` sandbox's Linux host, with glibc. Its folder's `README.md` covers the extensions
+it implements.
+
+`agents/opencode/` runs the [OpenCode](https://github.com/anomalyco/opencode) CLI behind the protocol's A2A agent
+framework: each turn is one `opencode run --format json` run, resumed in the context's OpenCode session, the task env's
+MCP servers go to the run's own inline config, and its JSON events are the turn's trajectory. Name it as `opencode`, its
+alias, or by its id, `@local/agentenv-framework/agents/opencode`. It calls the `[model]` endpoint as an
+OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from the prompt, else
+`anthropic/claude-sonnet-4-6`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
+with glibc. Its folder's `README.md` covers the extensions it implements.
+
 `agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
 protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a
 persisted SDK conversation, the task env's MCP servers go to its `mcp_config`, and its SDK events are the turn's
@@ -51,9 +69,10 @@ calls the `[model]` endpoint through LiteLLM and takes its model from the prompt
 `[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets. Its folder's
 `README.md` covers the extensions it implements.
 
-A release publishes Codex's, pi's and OpenHands' images too, at `ghcr.io/scaleapi/agentenv-codex:src-<hex>`,
-`ghcr.io/scaleapi/agentenv-pi:src-<hex>` and `ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only
-when its folder changes, and a run deploys
+A release publishes Codex's, Gemini's, OpenCode's, pi's and OpenHands' images too, at
+`ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
+`ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>` and
+`ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only when its folder changes, and a run deploys
 them as it does Claude Code's: it pulls the image
 published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
 
@@ -66,5 +85,6 @@ the host's own Python in a venv. Its `agent.toml` sets `takes_credentials = fals
 store credentials. A release publishes its image at `ghcr.io/scaleapi/agentenv-proxy:src-<hex>`, as it does the
 others'. It has no alias and no smoke task: with nobody driving it, a prompt only waits out its deadline.
 
-`agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs Claude
-Code's alone, `--task codex-smoke` Codex's, `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'.
+`agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs
+Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task opencode-smoke` OpenCode's,
+`--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'. 

@@ -2,5 +2,7 @@
 [agents]
 claude-code = ["claude-code"]
 codex = ["codex"]
+gemini = ["gemini"]
+opencode = ["opencode"]
 pi = ["pi"]
 openhands = ["openhands"]
