@@ -283,6 +283,20 @@ def test_a_tool_actions_deadline_covers_connecting_to_its_server(client):
     assert time.monotonic() - started < 5
 
 
+def test_a_server_that_never_lists_its_tools_is_a_bad_gateway(client, monkeypatch):
+    monkeypatch.setattr(proxy, "TOOL_TIMEOUT_SECONDS", 0.5)
+    with socket.socket() as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        _register(client, f"http://127.0.0.1:{silent.getsockname()[1]}/mcp")
+        task_id = _send(client, "go")
+
+        response = _proxy(client, "tools", task_id=task_id)
+
+    assert response.status_code == 502
+    assert "didn't list its tools within 0.5s" in response.text
+
+
 def test_a_turns_actions_share_one_connection_to_each_env_server_which_closes_with_the_turn(client, env, monkeypatch):
     opened, closed, results = [], [], []
     open_session, close_session = ToolSession.open, ToolSession.close

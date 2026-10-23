@@ -285,7 +285,7 @@ class ProxyAgent(AgentEnvAgent):
                 for server in turn.servers:
                     try:
                         listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
-                    except TimeoutError:
+                    except asyncio.TimeoutError:
                         raise HTTPException(status_code=502, detail=(
                             f"env server {server!r} didn't list its tools within {TOOL_TIMEOUT_SECONDS}s")) from None
                     except (ToolSessionError, httpx.HTTPError) as e:
@@ -339,7 +339,7 @@ class ProxyAgent(AgentEnvAgent):
             try:
                 called = await asyncio.wait_for(self._called(turn, action), timeout)
                 result = ProxyToolResult(content=called.content, is_error=called.isError)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 result = _tool_error(f"the tool call timed out after {timeout:g}s")
             except (ToolSessionError, httpx.HTTPError) as e:
                 result = _tool_error(f"{type(e).__name__}: {e}")
