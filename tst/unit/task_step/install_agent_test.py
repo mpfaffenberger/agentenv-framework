@@ -130,6 +130,7 @@ def test_a2a_port_roundtrip():
 
 class _InstallSandbox:
     ON_THIS_MACHINE = False
+    type = "modal_vm"
 
     def __init__(self):
         self.scripts: list[str] = []
@@ -316,7 +317,9 @@ PROXY = "@local/agentenv-framework/agents/proxy"
 CODEX_INSTALL = {"params": {"workdir_host": "/opt/agent-{agent_name}/workspace", "user_host": "agent-{agent_name}",
                             "install_commands_host": ["install codex"], "a2a_port": 8000}}
 PROXY_INSTALL = {"params": {"install_commands_host": ["serve as {user} in {workdir} on {a2a_port}"],
-                               "required_params_host": ["user", "workdir", "a2a_port"], "a2a_port": 8000}}
+                               "required_params_host": ["user", "workdir", "a2a_port"],
+                               "install_commands": ["serve in {container} on {a2a_port}"],
+                               "required_params": ["container", "a2a_port"], "a2a_port": 8000}}
 
 
 def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, container_name=None):
@@ -365,11 +368,15 @@ async def test_a_proxy_needs_the_replaced_agent_to_say_where_it_works(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_a_proxy_isnt_installed_into_a_container(monkeypatch, local_stores):
-    step, context, _ = _installing_in_place(monkeypatch, container_name="task")
+async def test_a_proxy_is_installed_into_the_container_the_agent_it_replaces_would_be(monkeypatch, local_stores):
+    step, context, sandbox = _installing_in_place(monkeypatch, container_name="task",
+                                                  codex={"params": {"install_commands": ["install codex"]}})
 
-    with pytest.raises(RuntimeError, match="installed on the VM host, not in a container"):
-        await step.execute(context)
+    await step.execute(context)
+
+    assert [s for s in sandbox.scripts if s.startswith(("serve", "install"))] == [
+        f"serve in {sandbox.scoped_name('task')} on 8000"]
+    assert [agent.agent_name for agent in context.deployed_agents] == ["solver"]
 
 
 @pytest.mark.asyncio

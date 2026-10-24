@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import subprocess
 
+import pytest
+
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.bundle.installed import write_installed
 from agent_env.task.episode.steps import PROXY_AGENT_ID
@@ -18,25 +20,31 @@ def _extensions() -> dict:
     return {ext["uri"]: ext for ext in card["capabilities"]["extensions"]}
 
 
-def test_the_card_offers_the_proxy_and_a_host_install_only():
+def test_the_card_offers_the_proxy_and_an_install_on_a_host_or_into_a_container():
     extensions = _extensions()
     assert {"urn:agentenv:proxy/v1", "urn:agentenv:mcp-config/v1", "urn:agentenv:trajectory/v1",
             "urn:agentenv:install/v1"} <= set(extensions)
     params = extensions["urn:agentenv:install/v1"]["params"]
-    assert params["install_commands_host"] and not params.get("install_commands")
+    assert params["install_commands_host"] and params["install_commands"]
 
 
-def test_the_host_install_asks_only_for_params_install_agent_supplies_and_runs_the_folders_script():
+@pytest.mark.parametrize(("commands", "required", "container", "script"), [
+    ("install_commands_host", "required_params_host", None,
+     "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} {workdir} {user}"),
+    ("install_commands", "required_params", "task", "bash {work_dir}/agent/install.sh container {container} {a2a_port}"),
+])
+def test_each_install_asks_only_for_params_install_agent_supplies_and_runs_the_folders_script(commands, required,
+                                                                                              container, script):
     params = _extensions()["urn:agentenv:install/v1"]["params"]
-    supplied = set(_build_param_resolvers(container_name=None, work_dir="/w", agent_ctx_tar="/w/a.tgz", a2a_port=8000,
-                                          config=None, agent_name="a"))
-    placeholders = {name for command in params["install_commands_host"] for name in re.findall(r"\{(\w+)\}", command)}
-    assert placeholders == set(params["required_params_host"]) and placeholders <= supplied
-    assert params["install_commands_host"][-1] == "sh {work_dir}/agent/install.sh {agent_name} {a2a_port} {workdir} {user}"
+    supplied = set(_build_param_resolvers(container_name=container, work_dir="/w", agent_ctx_tar="/w/a.tgz",
+                                          a2a_port=8000, config=None, agent_name="a"))
+    placeholders = {name for command in params[commands] for name in re.findall(r"\{(\w+)\}", command)}
+    assert placeholders == set(params[required]) and placeholders <= supplied
+    assert params[commands][-1] == script
 
 
 def test_the_install_script_parses_and_the_image_keeps_it_in_its_build_context():
-    subprocess.run(["sh", "-n", str(AGENT_DIR / "install.sh")], check=True)
+    subprocess.run(["bash", "-n", str(AGENT_DIR / "install.sh")], check=True)
     assert "COPY a2a_server.py install.sh ./" in (AGENT_DIR / "Dockerfile").read_text()
 
 

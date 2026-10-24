@@ -250,7 +250,8 @@ class InstallAgentTaskStep(TaskStep):
             raise RuntimeError(problem)
         place = None
         if proxy := self.step_param_overrides(context).get("proxy"):
-            place = await self._place_of(sandbox, agent)
+            if self.container_name is None:
+                place = await self._place_of(sandbox, agent)
             agent = A2AAgent.get(proxy)
             if problem := _install_problem(agent):
                 raise RuntimeError(problem)
@@ -388,11 +389,8 @@ class InstallAgentTaskStep(TaskStep):
 
     async def _place_of(self, sandbox, agent: A2AAgent) -> dict[str, str]:
         """Where ``agent``, which a proxy replaces, works on the VM host and as which user: its install/v1 params
-        ``workdir_host`` and ``user_host``, templates of ``{agent_name}`` as its install commands are."""
-        if self.container_name is not None:
-            raise RuntimeError(
-                f"install_agent '{self.id}': a proxy replaces an agent installed on the VM host, not in a container"
-            )
+        ``workdir_host`` and ``user_host``, templates of ``{agent_name}`` as its install commands are. In a container
+        no place is read: the proxy works there as root in the container's working directory, as an agent does."""
         if sandbox.ON_THIS_MACHINE:
             raise RuntimeError(
                 f"install_agent '{self.id}': a proxy isn't installed on a sandbox that runs on this machine, where "

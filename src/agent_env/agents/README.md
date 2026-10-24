@@ -81,7 +81,8 @@ which has no model: an episode deploys it in the place of the agent its caller p
 through it over `urn:agentenv:proxy/v1`. Env tool calls and `bash` run in it, where the agent would work, and it
 records the turn. Its image works in `/app` as user `agent`. On a `vm` sandbox's host, `install.sh` installs it
 where the agent it replaces declares it works (`workdir_host` and `user_host` in that agent's `install/v1`), with
-the host's own Python in a venv. Its `agent.toml` sets `takes_credentials = false`, so it's given no model key or
+the host's own Python in a venv; into a task's container, it installs as root in the container's working directory,
+as an agent installed there works, with a private Python of uv's. Its `agent.toml` sets `takes_credentials = false`, so it's given no model key or
 store credentials. A release publishes its image at `ghcr.io/scaleapi/agentenv-proxy:src-<hex>`, as it does the
 others'. It has no alias and no smoke task: with nobody driving it, a prompt only waits out its deadline.
 

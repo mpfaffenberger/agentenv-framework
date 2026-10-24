@@ -172,9 +172,6 @@ REFUSED = {
                                 "needs exactly one deploy_agent or install_agent step, not 2"),
     "deploy_human_agent": (({"id": "human", "type": "deploy_human_agent", **AT_THE_AGENT},), {"agent": None},
                            "step 'human': deploy_human_agent deploys 'default-agent', which is played from outside"),
-    "an install into a container": ({}, {"agent": {**INSTALL, "container_name": "task"}},
-                                    "step 'agent': an outside agent's proxy replaces an agent installed on the VM "
-                                    "host, not in container 'task'"),
     "parts": ({}, {"play": {**PLAY, "prompt": None, "parts": [{"kind": "text", "text": "Plan."}]}},
               "step 'play': an outside agent's prompt can't have parts, only a text prompt"),
     "output_format": ({}, {"play": {**PLAY, "output_format": {"type": "json_schema", "schema": {}}}},
@@ -247,6 +244,7 @@ ALLOWED = {
         {"verify": {"id": "rubric", "type": "rubrics_verifier", "prompt_id": "play", "criteria": [],
                     "use_agent_judge": False}},),
     "installing the outside agent on a VM host": ({"agent": INSTALL},),
+    "installing the outside agent into a container": ({"agent": {**INSTALL, "container_name": "task"}},),
     **{name: ({"agent": replace["agent"]} if replace else {"extra": extra[0]},)
        for name, (extra, replace) in IN_THE_SANDBOX.items() if name != "an install"},
     "tearing down an outside agent": ({"down": {"id": "down", "type": "teardown_sandboxes",

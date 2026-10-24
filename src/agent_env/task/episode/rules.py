@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from agent_env.task_step.task_step import TaskStep
     from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
     from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
-    from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.peer_agents import PeerAgentsTaskStep
     from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
@@ -88,13 +87,6 @@ def _deploy_agent(step: DeployAgentTaskStep, outside: Outside) -> list[str]:
     ]
 
 
-def _install_agent(step: InstallAgentTaskStep, outside: Outside) -> list[str]:
-    if step.agent_name not in outside.agents or step.container_name is None:
-        return []
-    return [f"an outside agent's proxy replaces an agent installed on the VM host, not in container "
-            f"{step.container_name!r}"]
-
-
 def _deploys_an_agent(step: TaskStep, outside: Outside) -> list[str]:
     if step.agent_name not in outside.agents:
         return []
@@ -139,7 +131,6 @@ def _rubrics_verifier(step: RubricsVerifierTaskStep, outside: Outside) -> list[s
 CHECKS: dict[str, Callable[..., list[str]]] = {
     "prompt_agent": _prompt_agent,
     "deploy_agent": _deploy_agent,
-    "install_agent": _install_agent,
     "deploy_human_agent": _deploys_an_agent,
     "register_agent_triggers": _needs_the_agent,
     "snapshot_agent_state": _needs_the_agent,
@@ -165,8 +156,8 @@ UNAFFECTED = frozenset({
     "agent_prompt_response_verifier", "verify_mcp_env_assessment",
     # It skips an agent that isn't deployed.
     "teardown_sandboxes",
-    # They act on an outside agent's proxy, in its sandbox, as on the agent.
-    "add_skills", "load_artifact", "run_code", "verify_sandbox",
+    # They act on an outside agent's proxy, in its sandbox, as on the agent; install_agent installs the proxy in its place.
+    "add_skills", "install_agent", "load_artifact", "run_code", "verify_sandbox",
 })
 
 DEPLOYS = ("deploy_agent", "install_agent")
