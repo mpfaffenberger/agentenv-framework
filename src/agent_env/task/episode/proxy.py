@@ -28,7 +28,8 @@ class ProxyRefused(Exception):
 
 
 class ProxyClient:
-    """One proxy, claimed with a token of this episode's, at the endpoints its card names."""
+    """One proxy, claimed with a token of this episode's, at the endpoints its card names. A call that doesn't reach
+    the proxy, over a connection a tunnel dropped say, is tried again, except ``record``'s, which isn't idempotent."""
 
     def __init__(self, a2a_url: str, card: dict[str, Any]):
         proxy = A2AAgent.find_extension(card, PROXY_V1.uri)
@@ -52,19 +53,20 @@ class ProxyClient:
         """``action``'s result, once it has run in the turn. A call that didn't reach the proxy is tried again: the
         action's id makes a retry return the action it already started."""
         action_id = secrets.token_hex(16)
-        state = await self._retried("act", task_id=task_id, action_id=action_id, action=action)
+        state = await self._call("act", task_id=task_id, action_id=action_id, action=action)
         while not state["done"]:
-            state = await self._retried("result", action_id=action_id)
+            state = await self._call("result", action_id=action_id)
         return state["result"]
 
     async def record(self, task_id: str, message: str | dict[str, Any], model: str | None,
                      usage: dict[str, Any] | None) -> None:
-        await self._call("record", task_id=task_id, message=message, model=model, usage=usage)
+        _raise_for_status(await self._post("record", {"task_id": task_id, "message": message, "model": model,
+                                                      "usage": usage}, attempts=1))
 
     async def reply(self, task_id: str, **reply: Any) -> bool:
-        """Whether the reply reached an open turn: a turn its sender stopped waiting for is gone."""
-        response = await self._client.post(self._endpoints["reply"], json={"token": self._token, "task_id": task_id,
-                                                                           **reply})
+        """Whether the reply reached an open turn: a turn its sender stopped waiting for is gone, as is one a reply that
+        reached it but whose answer was lost ended."""
+        response = await self._post("reply", {"task_id": task_id, **reply})
         if response.status_code == 404:
             return False
         _raise_for_status(response)
@@ -73,20 +75,20 @@ class ProxyClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def _retried(self, operation: str, **body: Any) -> dict[str, Any]:
-        for attempt in range(1, _ATTEMPTS + 1):
+    async def _call(self, operation: str, **body: Any) -> dict[str, Any]:
+        response = await self._post(operation, body)
+        _raise_for_status(response)
+        return response.json() or {}
+
+    async def _post(self, operation: str, body: dict[str, Any], *, attempts: int = _ATTEMPTS) -> httpx.Response:
+        for attempt in range(1, attempts + 1):
             try:
-                return await self._call(operation, **body)
+                return await self._client.post(self._endpoints[operation], json={"token": self._token, **body})
             except httpx.TransportError:
-                if attempt == _ATTEMPTS:
+                if attempt == attempts:
                     raise
                 await asyncio.sleep(_RETRY_SECONDS)
         raise AssertionError("unreachable")
-
-    async def _call(self, operation: str, **body: Any) -> dict[str, Any]:
-        response = await self._client.post(self._endpoints[operation], json={"token": self._token, **body})
-        _raise_for_status(response)
-        return response.json() or {}
 
 
 class InProcessProxy:
