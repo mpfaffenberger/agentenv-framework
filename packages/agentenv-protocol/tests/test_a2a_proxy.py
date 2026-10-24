@@ -45,11 +45,27 @@ class _Items:
         return json.dumps({"role": ctx.caller.role})
 
 
+class _Terminal:
+    @tool()
+    def bash(self, command: str, cwd: str = "/") -> str:
+        """Run a command in the env's own terminal."""
+        return f"{cwd}$ {command}"
+
+
 @pytest.fixture(scope="module")
 def env():
     """An items env's MCP server on loopback, as a task's env serves one."""
-    handler = _Items()
-    app = create_fastmcp_app(handler, card=EnvironmentCard(name="items")).streamable_http_app()
+    yield from _served(_Items(), "items")
+
+
+@pytest.fixture(scope="module")
+def terminal():
+    """An env whose own tool is named ``bash``."""
+    yield from _served(_Terminal(), "terminal")
+
+
+def _served(handler: Any, name: str):
+    app = create_fastmcp_app(handler, card=EnvironmentCard(name=name)).streamable_http_app()
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
@@ -474,6 +490,25 @@ def test_recorded_model_calls_are_checked_against_the_actions_that_run(client, e
             spans[0]["attributes"]["gen_ai.usage.output_tokens"]) == ("qwen", 12, 7)
     assert _attrs(spans[2], "gen_ai.prompt") == {"input": {"item": "crate"}}
     assert task["status"]["message"]["parts"][1]["data"]["usage"]["tool_call_count"] == 3
+
+
+def test_an_env_tool_named_bash_is_held_to_all_its_recorded_arguments(terminal, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(ProxyAgent(shell=False, long_poll_seconds=0.2).create_app()) as client:
+        client.post("/ext/proxy/claim", json={"token": TOKEN})
+        _register(client, terminal[1], name="terminal")
+        task_id = _send(client, "go")
+        message = {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": "bash", "arguments": '{"command": "ls", "cwd": "/a"}'}}]}
+
+        assert _proxy(client, "record", task_id=task_id, message=message).status_code == 200
+        moved = _proxy(client, "act", task_id=task_id, action_id="b", action={
+            "kind": "tool", "server": "terminal", "name": "bash", "arguments": {"command": "ls", "cwd": "/b"}})
+        ran = _done(client, task_id, "a", {"kind": "tool", "server": "terminal", "name": "bash",
+                                          "arguments": {"command": "ls", "cwd": "/a"}})
+
+    assert moved.status_code == 409
+    assert ran["content"][0]["text"] == "/a$ ls"
 
 
 def test_two_model_calls_recorded_at_once_are_held_one_after_the_other(client, monkeypatch):

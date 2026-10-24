@@ -209,7 +209,7 @@ class ProxyAgent(AgentEnvAgent):
             raise HTTPException(status_code=409, detail="this proxy works in no sandbox, so it runs no commands")
         if turn.recorded:
             call = (_call(action.name, action.arguments) if isinstance(action, ProxyToolAction)
-                    else _call(BASH, {"command": action.command}))
+                    else _call(BASH, {"command": action.command}, own_shell=True))
             if call not in turn.pending:
                 raise HTTPException(status_code=409, detail=f"the last recorded model call didn't make this call to "
                                                             f"{call[0]!r}")
@@ -233,7 +233,8 @@ class ProxyAgent(AgentEnvAgent):
         turn = self._open_turn(request.token, request.task_id)
         if turn.pending:
             raise HTTPException(status_code=409, detail=_unrun(turn))
-        turn.pending = [_call(name, arguments) for name, arguments in calls if name in offered]
+        turn.pending = [_call(name, arguments, own_shell=offered[name].server is None)
+                        for name, arguments in calls if name in offered]
         turn.recorded = True
         turn.model = request.model or turn.model
         span = _span("chat", "chat", turn.last_event, turn.model, completion={"content": content})
@@ -481,10 +482,10 @@ def _unrun(turn: _Turn) -> str:
     return f"the last recorded model call's calls to {sorted({name for name, _ in turn.pending})} haven't run"
 
 
-def _call(name: str, arguments: dict[str, Any]) -> tuple[str, str]:
-    """A call as recorded calls and actions are compared: ``bash`` by its command alone, since an action carries
-    nothing else, and a whole float equal to the int a driver may have written for it."""
-    if name == BASH:
+def _call(name: str, arguments: dict[str, Any], *, own_shell: bool = False) -> tuple[str, str]:
+    """A call as recorded calls and actions are compared: the proxy's own ``bash`` by its command alone, since its
+    action carries nothing else, and a whole float equal to the int a driver may have written for it."""
+    if own_shell:
         arguments = {"command": arguments.get("command")}
     return name, json.dumps(_whole(arguments), sort_keys=True, separators=(",", ":"), default=str)
 
