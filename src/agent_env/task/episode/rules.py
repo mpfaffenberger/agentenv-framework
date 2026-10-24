@@ -66,7 +66,6 @@ def _prompt_agent(step: PromptAgentTaskStep, outside: Outside) -> list[str]:
         return [
             f"an outside agent's prompt can't have {what}" for what, present in (
                 ("parts, only a text prompt", step.parts is not None),
-                ("a user simulator (max_conversation_turns > 1)", step.max_conversation_turns > 1),
                 ("output_format", step.output_format),
                 ("agentenv_tools", step.agentenv_tools),
                 ("snapshot_config", step.snapshot_config),

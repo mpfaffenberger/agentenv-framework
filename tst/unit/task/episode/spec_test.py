@@ -177,9 +177,6 @@ REFUSED = {
                                     "host, not in container 'task'"),
     "parts": ({}, {"play": {**PLAY, "prompt": None, "parts": [{"kind": "text", "text": "Plan."}]}},
               "step 'play': an outside agent's prompt can't have parts, only a text prompt"),
-    "user simulator": ({}, {"play": {**PLAY, "max_conversation_turns": 2}},
-                       "step 'play': an outside agent's prompt can't have a user simulator "
-                       "(max_conversation_turns > 1)"),
     "output_format": ({}, {"play": {**PLAY, "output_format": {"type": "json_schema", "schema": {}}}},
                       "step 'play': an outside agent's prompt can't have output_format"),
     "agentenv_tools": ({}, {"play": {**PLAY, "agentenv_tools": ["complete_step"]}},

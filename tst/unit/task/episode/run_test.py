@@ -2,11 +2,15 @@
 
 import asyncio
 import json
+import threading
+import time
 
 import httpx
 import pytest
 import pytest_asyncio
+import uvicorn
 from agentenv_protocol import EnvironmentTool, ToolResult, ToolSessionError
+from agentenv_protocol.a2a_agent import AgentEnvAgent, AgentIdentity, TaskRequest, TaskResult, a2a_agent
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 import agent_env.task.episode.run as episode_run
@@ -726,6 +730,41 @@ async def test_a_model_call_in_a_shape_the_proxy_cant_read_is_refused(teardowns)
 
     with pytest.raises(EpisodeError, match="OpenAI chat message, an Anthropic message or a string"):
         await turn.record_model_call({"role": "assistant", "content": {"not": "readable"}})
+
+
+@a2a_agent(identity=AgentIdentity(name="bob", description="Asks for one thing more.", version="1.0.0"))
+class _Bob(AgentEnvAgent):
+    async def run(self, request: TaskRequest) -> TaskResult:
+        return TaskResult.text("And a box.")
+
+
+@pytest.fixture
+def bob():
+    """A counterpart on loopback that the outside agent's prompt converses with."""
+    server = uvicorn.Server(uvicorn.Config(_Bob().create_app(), host="127.0.0.1", port=0, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started:
+        time.sleep(0.01)
+    yield f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+    server.should_exit = True
+    thread.join(5)
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_with_the_outside_agent_is_played_a_turn_per_message(teardowns, bob):
+    episode = await _spec(ITEMS, ALICE, {**TURN, "max_conversation_turns": 2, "user_a2a_url": bob}, REPLIES).start()
+
+    first = await episode.next_turn()
+    await first.end("Added a crate.")
+    second = await episode.next_turn()
+    await second.end("Added a box.")
+
+    assert [(turn.step_id, turn.prompt) for turn in (first, second)] == [
+        ("turn", "Add a crate."), ("turn", "And a box.")]
+    assert await episode.result() == {"replies": 1.0}
+    [response] = Task.get_instance(episode.id).context["prompt_responses"]
+    assert response["response"] == "Added a box."
 
 
 @pytest.mark.asyncio
