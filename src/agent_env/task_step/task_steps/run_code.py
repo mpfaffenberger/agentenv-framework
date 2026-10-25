@@ -453,7 +453,7 @@ class RunCodeTaskStep(TaskStep):
             # A host-installed agent has no container: stage and run on the VM host, as root.
             return _HostTarget(sandbox)
         prefix = (
-            ("sudo", "docker", "exec", "-u", "0", sandbox.container_name)
+            ("sudo", "docker", "exec", "-u", "0", agent.container_name or sandbox.container_name)
             if sandbox.mode == SANDBOX_MODE_VM
             else ()
         )

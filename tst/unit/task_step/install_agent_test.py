@@ -355,7 +355,8 @@ async def test_a_proxy_is_installed_where_the_agent_it_replaces_says_it_works(mo
 
     assert [s for s in sandbox.scripts if s.startswith(("serve", "install"))] == [
         "serve as agent-solver in /opt/agent-solver/workspace on 8000"]
-    assert [agent.agent_name for agent in context.deployed_agents] == ["solver"]
+    assert [(agent.agent_name, agent.on_host, agent.container_name) for agent in context.deployed_agents] == [
+        ("solver", True, None)]
 
 
 @pytest.mark.asyncio
@@ -376,7 +377,8 @@ async def test_a_proxy_is_installed_into_the_container_the_agent_it_replaces_wou
 
     assert [s for s in sandbox.scripts if s.startswith(("serve", "install"))] == [
         f"serve in {sandbox.scoped_name('task')} on 8000"]
-    assert [agent.agent_name for agent in context.deployed_agents] == ["solver"]
+    assert [(agent.agent_name, agent.on_host, agent.container_name) for agent in context.deployed_agents] == [
+        ("solver", False, sandbox.scoped_name("task"))]
 
 
 @pytest.mark.asyncio

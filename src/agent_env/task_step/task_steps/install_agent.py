@@ -361,6 +361,7 @@ class InstallAgentTaskStep(TaskStep):
             a2a_card=agent_card,
             instance_id=deployed.instance_id,
             on_host=host_mode,
+            container_name=container,
         ))
 
         default_model = agent.metadata.get("default_model") or get_config().get_model_for_role("agent")

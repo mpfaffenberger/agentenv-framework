@@ -125,9 +125,10 @@ class VerifySandboxTaskStep(TaskStep):
             deployed, sandbox = await self._deployed_sandbox(context)
         logger.info(f"Connected to sandbox {sandbox.sandbox_id} (mode={sandbox.mode})")
         if on_agent:
-            # An agent installed on a VM's host has no container: its files are on the host.
+            # An agent installed on a VM's host has no container: its files are on the host. One installed into a
+            # container works in that one.
             container = (
-                await find_agent_container(sandbox)
+                agent.container_name or await find_agent_container(sandbox)
                 if sandbox.mode == SANDBOX_MODE_VM and not agent.on_host
                 else None
             )

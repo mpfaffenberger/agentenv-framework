@@ -659,6 +659,23 @@ async def test_host_installed_agent_on_a_vm_runs_on_the_host():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("installed_in,expected", [(None, "agent-api"), ("agent-api", "agent-api"), ("task", "task")])
+async def test_an_agent_on_a_vm_runs_the_script_in_the_container_it_was_installed_in(installed_in, expected):
+    ctx = _make_context()
+    ctx.deployed_agents[0].sandbox_type = "modal_vm"
+    ctx.deployed_agents[0].container_name = installed_in
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(return_value=_vm_sandbox_mock())
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        return_value=provider,
+    ):
+        target = await _step()._agent_target(ctx)
+
+    assert target.prefix == ("sudo", "docker", "exec", "-u", "0", expected)
+
+
+@pytest.mark.asyncio
 async def test_timeout_is_reported():
     with _sandbox([(124, "", "")]):  # the runner's status at the limit
         with pytest.raises(RunCodeExecutionError, match="timed out"):
