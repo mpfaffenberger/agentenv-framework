@@ -272,11 +272,13 @@ class A2AAgent:
         return skill_ext
 
     @staticmethod
-    async def install_cli(deployed: "DeployedA2AAgent", cli_artifact: "CliArtifact", gateway_url: str) -> str:
-        """Install a CliArtifact bundle into the agent's filesystem at /opt/cli/<command>/.
-        Writes a sidecar bin/.env with the gateway URL and chmod +x's the entrypoint.
-        Idempotent. Returns the in-process path to the executable entrypoint."""
-        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+    async def install_cli(
+        deployed: "DeployedA2AAgent", cli_artifact: "CliArtifact", gateway_url: str, container: str | None = None,
+    ) -> str:
+        """Install a CliArtifact bundle into the agent's filesystem at /opt/cli/<command>/, in ``container`` when
+        install_agent put the agent in one. Writes a sidecar bin/.env with the gateway URL and chmod +x's the
+        entrypoint. Idempotent. Returns the in-process path to the executable entrypoint."""
+        from agent_env.providers.sandbox_providers.sandbox import VmSandbox, into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
         provider = build_sandbox_provider(deployed.sandbox_type) if deployed.sandbox_type else get_agent_sandbox_provider()
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
@@ -285,13 +287,16 @@ class A2AAgent:
         env_dir = posixpath.dirname(entrypoint_path)
 
         # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
-        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}")
+        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}",
+                                           **into_container(container))
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():
-            await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}")
+            await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}",
+                                                 **into_container(container))
 
         if isinstance(sandbox, VmSandbox):
-            await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} chmod +x {entrypoint_path}")
+            await sandbox.exec_script(
+                f"docker exec -u 0 {shlex.quote(container or sandbox.container_name)} chmod +x {entrypoint_path}")
         else:
             await sandbox.exec("chmod", "+x", entrypoint_path)
 
@@ -303,8 +308,10 @@ class A2AAgent:
         deployed: "DeployedA2AAgent",
         universe: "FileArtifactUniverse",
         destination_path: str,
+        container: str | None = None,
     ) -> dict[str, str]:
-        """Stage every FileArtifact in `universe` into the agent sandbox under destination_path."""
+        """Stage every FileArtifact in `universe` into the agent sandbox under destination_path, in ``container`` when
+        install_agent put the agent in one."""
         from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
 
@@ -323,7 +330,7 @@ class A2AAgent:
             f"Loading FileArtifactUniverse '{universe.id}' v{universe.version} "
             f"({len(file_artifacts)} file(s)) into agent at {destination}"
         )
-        return await stage_files_into_container(sandbox, file_artifacts, destination)
+        return await stage_files_into_container(sandbox, file_artifacts, destination, container)
 
     def __init__(
         self,

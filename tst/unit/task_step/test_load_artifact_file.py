@@ -3,18 +3,22 @@ target ``load_artifact`` supports, through each target's real loader."""
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
 
 from agent_env.a2a_agent import store as agent_store
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.env import env as env_module
 from agent_env.env.env import DeployedGatewayEnv, Env
 from agent_env.providers.sandbox_providers import sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from tst.util.exec_scripts import script_run
 
 CHECK = FileArtifact(
     id="check", version=2, description="checker", filename="check.py",
@@ -155,3 +159,76 @@ async def test_into_an_agent(monkeypatch):
     assert (entry["agent_name"], entry["artifact_type"], entry["files"]) == (
         "solver", "file", {"check.py": "/tmp/file_artifacts/check.py"},
     )
+
+
+class _Vm(VmSandbox):
+    """A VM that records the scripts it runs on its host and the objects it pulls there."""
+
+    def __init__(self):
+        self.sandbox_id = "sb-agent"
+        self.scripts: list[str] = []
+
+    async def terminate(self) -> None:  # pragma: no cover
+        pass
+
+    async def exec(self, *command):  # pragma: no cover
+        return None
+
+    async def exec_with_output(self, *args):
+        self.scripts.append(script_run(args) if args[:3] == ("sudo", "bash", "-c") else " ".join(args))
+        return 0, "", ""
+
+    async def load_object_file(self, object_url, destination_path):
+        self.scripts.append(f"pull {object_url} {destination_path}")
+
+
+async def _load_into_agent(monkeypatch, installed_in: str | None, **load) -> list[str]:
+    """The scripts a load aimed at an agent runs on its VM, its staging paths as one name."""
+    sandbox = _Vm()
+    monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", _provider(sandbox))
+    monkeypatch.setattr(agent_store, "get_a2a_agent_instance_store",
+                        lambda: SimpleNamespace(get=lambda instance_id: SimpleNamespace(sandbox_type=None,
+                                                                                         sandbox_id="sb-agent")))
+    context = TaskStepContext()
+    context.deployed_agents = [DeployedAgent(agent_name="solver", api_url="https://agent", sandbox_id="sb-agent",
+                                             instance_id="inst-1", container_name=installed_in)]
+    await LoadArtifactTaskStep(id="stage", version=None, agent_name="solver", **load).execute(context)
+    return _unstaged(sandbox.scripts)
+
+
+def _unstaged(scripts: list[str]) -> list[str]:
+    """``scripts`` with each write's staging path, unique per call, as one name."""
+    return [re.sub(r"/tmp/_(\w+?)_[0-9a-f]{12}_", r"/tmp/_\1_", script) for script in scripts]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("load", [{"artifact_id": "check"}, {"urls": ["https://example.com/check.py"]}],
+                         ids=["artifact", "url"])
+async def test_into_an_agent_installed_into_a_container(monkeypatch, load):
+    deployed = await _load_into_agent(monkeypatch, None, **load)
+    in_its_own = await _load_into_agent(monkeypatch, "agent-api", **load)
+    in_another = await _load_into_agent(monkeypatch, "task", **load)
+
+    assert in_its_own == deployed
+    assert [s.split(" ")[3] for s in in_another if s.startswith("docker cp ")] == [
+        "task:/tmp/file_artifacts/check.py"]
+    assert not any("agent-api" in s for s in in_another)
+
+
+@pytest.mark.asyncio
+async def test_a_cli_reaches_an_agent_installed_into_a_container(monkeypatch):
+    cli = SimpleNamespace(id="tool", version=1, command_name="tool", entrypoint="bin/tool",
+                          get_cli_files=lambda: SimpleNamespace(get_file_artifacts=lambda: {"bin/tool": CHECK}))
+
+    async def _install(installed_in: str | None) -> list[str]:
+        sandbox = _Vm()
+        monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", _provider(sandbox))
+        await A2AAgent.install_cli(SimpleNamespace(sandbox_type=None, sandbox_id="sb-agent"), cli, "https://gateway",
+                                   installed_in)
+        return _unstaged(sandbox.scripts)
+
+    deployed, in_its_own, in_another = await _install(None), await _install("agent-api"), await _install("task")
+
+    assert in_its_own == deployed
+    assert "docker exec -u 0 task chmod +x /opt/cli/tool/bin/tool" in in_another
+    assert not any("agent-api" in s for s in in_another)

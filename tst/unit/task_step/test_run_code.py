@@ -664,15 +664,19 @@ async def test_an_agent_on_a_vm_runs_the_script_in_the_container_it_was_installe
     ctx = _make_context()
     ctx.deployed_agents[0].sandbox_type = "modal_vm"
     ctx.deployed_agents[0].container_name = installed_in
+    sandbox = _vm_sandbox_mock()
     provider = MagicMock()
-    provider.get_sandbox = AsyncMock(return_value=_vm_sandbox_mock())
+    provider.get_sandbox = AsyncMock(return_value=sandbox)
     with patch(
         "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
         return_value=provider,
     ):
         target = await _step()._agent_target(ctx)
+    await target.write_file("/tmp/run/input.json", "{}")
 
     assert target.prefix == ("sudo", "docker", "exec", "-u", "0", expected)
+    sandbox.write_file_from_text.assert_awaited_once_with(
+        "{}", "/tmp/run/input.json", **({"container": installed_in} if installed_in else {}))
 
 
 @pytest.mark.asyncio

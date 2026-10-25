@@ -404,7 +404,7 @@ class LoadArtifactTaskStep(TaskStep):
             EnvironmentUniverseArtifact,
         )
         from agent_env.env.env import Env, require_gateway_url
-        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+        from agent_env.providers.sandbox_providers.sandbox import VmSandbox, into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             SANDBOX_MODE_VM,
             build_sandbox_provider,
@@ -517,7 +517,8 @@ class LoadArtifactTaskStep(TaskStep):
                         raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                     deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
                     destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
-                    files = await A2AAgent.load_file_artifact_universe(deployed_agent, artifact, destination)
+                    files = await A2AAgent.load_file_artifact_universe(
+                        deployed_agent, artifact, destination, **into_container(agent.container_name))
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
                         "id": artifact.id,
                         "version": artifact.version,
@@ -559,7 +560,8 @@ class LoadArtifactTaskStep(TaskStep):
                             else get_agent_sandbox_provider()
                         )
                         sandbox = await provider.get_sandbox(agent.sandbox_id)
-                        container = sandbox.container_name if isinstance(sandbox, VmSandbox) else None
+                        container = agent.container_name or (
+                            sandbox.container_name if isinstance(sandbox, VmSandbox) else None)
                     destination = (destination_path or "/app/files").rstrip("/") or "/"
                     files = await _stage_environment_payload_into_container(
                         sandbox, container, artifact, destination,
@@ -610,7 +612,8 @@ class LoadArtifactTaskStep(TaskStep):
                 deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
                 gateway_url = reachable_url(require_gateway_url(deployed, "Installing a CliArtifact"),
                                             from_sandbox_type=deployed.sandbox_type, to_sandbox_type=agent.sandbox_type)
-                install_path = await A2AAgent.install_cli(deployed_agent, artifact, gateway_url)
+                install_path = await A2AAgent.install_cli(
+                    deployed_agent, artifact, gateway_url, **into_container(agent.container_name))
                 agent_clis = context.metadata.setdefault("installed_clis", {}).setdefault(self.agent_name, {})
                 agent_clis[artifact.id] = {
                     "install_path": install_path,
@@ -620,6 +623,7 @@ class LoadArtifactTaskStep(TaskStep):
                 raise ValueError(f"Unsupported artifact type for loading: '{artifact.type}'")
 
         if downloads:
+            agent_container = None
             if self.sandbox_name is not None:
                 sandbox = target_sandbox
             else:
@@ -632,6 +636,7 @@ class LoadArtifactTaskStep(TaskStep):
                     else get_agent_sandbox_provider()
                 )
                 sandbox = await provider.get_sandbox(agent.sandbox_id)
+                agent_container = agent.container_name
             destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
             semaphore = asyncio.Semaphore(8)
 
@@ -650,7 +655,7 @@ class LoadArtifactTaskStep(TaskStep):
                     elif self.container_name is not None:
                         await self._load_url_into_container(sandbox, sandbox.scoped_name(self.container_name), url, dest)
                     else:
-                        await sandbox.write_file_from_url(url, dest)
+                        await sandbox.write_file_from_url(url, dest, **into_container(agent_container))
                     logger.info(f"Loaded URL into {target_desc}: {url} -> {dest}")
 
             await asyncio.gather(*(_load_one(u, f) for u, f in downloads))

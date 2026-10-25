@@ -32,6 +32,7 @@ from typing import Any, ClassVar, Optional, Protocol
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import DeployedSandboxEnv, require_sandbox
+from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -457,7 +458,7 @@ class RunCodeTaskStep(TaskStep):
             if sandbox.mode == SANDBOX_MODE_VM
             else ()
         )
-        return _AgentTarget(sandbox, prefix)
+        return _AgentTarget(sandbox, prefix, agent.container_name)
 
     # --- errors ---
 
@@ -537,10 +538,12 @@ class _HostTarget:
 
 @dataclass
 class _AgentTarget:
-    """Runs the script inside a container: an agent's, a container sandbox's, or an env's in one."""
+    """Runs the script inside a container: an agent's, a container sandbox's, or an env's in one. ``container`` is
+    the one install_agent put the agent in, which its files are written into too."""
 
     sandbox: Any
     prefix: tuple[str, ...]
+    container: str | None = None
 
     def run_dir(self, step_id: str) -> str:
         return f"{_RUN_DIR}/{step_id}"
@@ -551,7 +554,7 @@ class _AgentTarget:
 
     async def write_file(self, path: str, content: str) -> None:
         # write_file_from_text takes (content, path); we expose (path, content).
-        await self.sandbox.write_file_from_text(content, path)
+        await self.sandbox.write_file_from_text(content, path, **into_container(self.container))
 
     async def run(self, *command: str) -> tuple[int, str, str]:
         return await self.sandbox.exec_with_output(*self.prefix, *command)
