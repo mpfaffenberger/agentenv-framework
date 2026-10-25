@@ -64,6 +64,8 @@ from ..types import EnvironmentTool
 
 LONG_POLL_SECONDS = 25.0
 BASH_TIMEOUT_SECONDS = 3600
+OUTPUT_GRACE_SECONDS = 1.0  # how long a done command's output may still arrive, from what it left running
+EXIT_POLL_SECONDS = 0.05
 TOOL_TIMEOUT_SECONDS = 600
 SKILLS_DIR = Path.home() / "skills"
 TRAJECTORY_FORMAT = "agentenv-proxy/v1"
@@ -144,6 +146,7 @@ class ProxyAgent(AgentEnvAgent):
         self._version = 0
         self._changed: asyncio.Future[None] | None = None
         self._actions: dict[str, tuple[_Turn, asyncio.Task[ProxyBashResult | ProxyToolResult]]] = {}
+        self._draining: set[asyncio.Task[None]] = set()
 
     async def run(self, request: TaskRequest[ProxyConfig]) -> TaskResult:
         if any(not isinstance(part, TextPart) for part in request.parts):
@@ -337,7 +340,7 @@ class ProxyAgent(AgentEnvAgent):
         if isinstance(action, ProxyBashAction):
             timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
             try:
-                result = await _run(self._program, action.command, timeout)
+                result = await _run(self._program, action.command, timeout, self._draining)
             except OSError as e:
                 # As a shell reports a command it can't execute: an argument list too long, say.
                 result = ProxyBashResult(exit_code=126, stdout="", stderr=f"error: the command couldn't start: {e}\n",
@@ -385,6 +388,8 @@ class ProxyAgent(AgentEnvAgent):
 
     async def _stop(self) -> None:
         await asyncio.gather(*(self._close(turn) for turn in list(self._turns.values())), return_exceptions=True)
+        for drain in list(self._draining):
+            drain.cancel()
 
     @contextlib.asynccontextmanager
     async def _skill_folder(self, name: str) -> AsyncIterator[Path]:
@@ -529,21 +534,59 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _run(program: str, command: str, timeout: float) -> ProxyBashResult:
-    """Run ``command`` in a process group of its own, stopped with whatever it started if it isn't done within
-    ``timeout``, or if the call is cancelled, even when ``bash`` has exited and a child it left holds the output open."""
+async def _run(program: str, command: str, timeout: float, draining: set[asyncio.Task[None]]) -> ProxyBashResult:
+    """Run ``command`` in a process group of its own. It's done when its shell exits: what it started in the background
+    keeps running, and output that arrives after ``OUTPUT_GRACE_SECONDS`` is read and dropped (in ``draining``), so a
+    server it started never blocks on a full pipe. A command not done within ``timeout``, or whose call is cancelled,
+    is stopped with whatever it started."""
     process = await asyncio.create_subprocess_exec(
         program, "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True,
     )
+    stdout, stderr = _Output(), _Output()
+    readers = [asyncio.create_task(_read(process.stdout, stdout)), asyncio.create_task(_read(process.stderr, stderr))]
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+        await asyncio.wait_for(_exited(process), timeout)
     except BaseException as e:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        await process.wait()
+        await _exited(process)
+        for reader in readers:
+            reader.cancel()
         if isinstance(e, asyncio.TimeoutError):
             return ProxyBashResult(exit_code=None, stdout="", stderr="", timed_out=True)
         raise
-    return ProxyBashResult(exit_code=process.returncode, stdout=stdout.decode(errors="replace"),
-                           stderr=stderr.decode(errors="replace"), timed_out=False)
+    await asyncio.wait(readers, timeout=OUTPUT_GRACE_SECONDS)
+    result = ProxyBashResult(exit_code=process.returncode, stdout=stdout.taken(), stderr=stderr.taken(),
+                             timed_out=False)
+    for reader in readers:
+        if not reader.done():
+            draining.add(reader)
+            reader.add_done_callback(draining.discard)
+    return result
+
+
+async def _exited(process: asyncio.subprocess.Process) -> None:
+    """Until the shell exits: ``Process.wait()`` also waits for everything still holding its output."""
+    while process.returncode is None:
+        await asyncio.sleep(EXIT_POLL_SECONDS)
+
+
+class _Output:
+    """What a command writes to one stream, kept until it's taken and dropped after."""
+
+    def __init__(self) -> None:
+        self._data: bytearray | None = bytearray()
+
+    def add(self, chunk: bytes) -> None:
+        if self._data is not None:
+            self._data.extend(chunk)
+
+    def taken(self) -> str:
+        data, self._data = self._data or bytearray(), None
+        return data.decode(errors="replace")
+
+
+async def _read(stream: asyncio.StreamReader, output: _Output) -> None:
+    while chunk := await stream.read(65536):
+        output.add(chunk)

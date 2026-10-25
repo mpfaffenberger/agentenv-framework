@@ -718,7 +718,9 @@ operations:
   "server", "name", "arguments"}` calls an env server through `ToolSession`, with the URL
   and headers registered for it, and `{"kind": "bash", "command"}` runs `bash -c` in the
   proxy's folder, as its user, in a process group of its own. Where there is no `bash`, as
-  in a minimal image, it runs `sh -c`, and the `bash` tool's description says so. Either takes
+  in a minimal image, it runs `sh -c`, and the `bash` tool's description says so. A command
+  is done when its shell exits: what it started in the background keeps running, and output
+  that arrives more than a second later is read and dropped. Either takes
   `"timeout_seconds"` (3600 for `bash`, 600 for a tool by default). The driver picks
   `action_id`, unique for the proxy, so a retried `act` returns the action it already
   started. It answers `{"done", "result"}` at once when the action ends within the long-poll;

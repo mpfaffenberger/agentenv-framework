@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -409,12 +411,37 @@ def test_a_command_that_outlives_its_timeout_is_stopped_with_what_it_started(cli
     task_id = _send(client, "go")
 
     waited = _done(client, task_id, "w", _bash("sleep 60 & echo $! > waited; wait", timeout_seconds=0.5))
-    left = _done(client, task_id, "l", _bash("sleep 60 & echo $! > left", timeout_seconds=0.5))
 
-    assert waited == left == {"kind": "bash", "stdout": "", "stderr": "", "timed_out": True}
+    assert waited == {"kind": "bash", "stdout": "", "stderr": "", "timed_out": True}
     assert ProxyActionState.model_validate({"done": True, "result": waited}).result.exit_code is None
     _stopped(int((tmp_path / "waited").read_text()))
-    _stopped(int((tmp_path / "left").read_text()))
+
+
+def test_a_command_is_done_when_its_shell_exits_and_what_it_left_in_the_background_runs_on(client, tmp_path):
+    task_id = _send(client, "go")
+
+    started = time.monotonic()
+    left = _done(client, task_id, "l", _bash("sleep 60 & echo $! > left; echo started"))
+
+    assert left == {"kind": "bash", "exit_code": 0, "stdout": "started\n", "stderr": "", "timed_out": False}
+    assert time.monotonic() - started < proxy.OUTPUT_GRACE_SECONDS + 2
+    pid = int((tmp_path / "left").read_text())
+    assert _state(pid) and not _state(pid).startswith("Z")
+    os.kill(pid, signal.SIGKILL)
+
+
+def test_what_a_background_process_writes_after_its_command_is_done_never_blocks_it(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy, "OUTPUT_GRACE_SECONDS", 0.1)
+    task_id = _send(client, "go")
+    writes = "import sys, time; time.sleep(0.5); sys.stdout.write('x' * 200_000); sys.stdout.flush(); open('done', 'w')"
+
+    result = _done(client, task_id, "b", _bash(f"python3 -c \"{writes}\" & echo started"))
+
+    assert (result["exit_code"], result["stdout"]) == (0, "started\n")
+    deadline = time.monotonic() + 10
+    while not (tmp_path / "done").exists():
+        assert time.monotonic() < deadline, "the background process blocked on its output"
+        time.sleep(0.05)
 
 
 def test_a_command_too_long_to_start_fails_as_a_shell_reports_it(client):
