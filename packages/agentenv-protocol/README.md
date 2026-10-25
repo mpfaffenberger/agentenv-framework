@@ -717,7 +717,8 @@ operations:
 - `act` (`{"token", "task_id", "action_id", "action"}`) runs one action: `{"kind": "tool",
   "server", "name", "arguments"}` calls an env server through `ToolSession`, with the URL
   and headers registered for it, and `{"kind": "bash", "command"}` runs `bash -c` in the
-  proxy's folder, as its user, in a process group of its own; either takes
+  proxy's folder, as its user, in a process group of its own. Where there is no `bash`, as
+  in a minimal image, it runs `sh -c`, and the `bash` tool's description says so. Either takes
   `"timeout_seconds"` (3600 for `bash`, 600 for a tool by default). The driver picks
   `action_id`, unique for the proxy, so a retried `act` returns the action it already
   started. It answers `{"done", "result"}` at once when the action ends within the long-poll;

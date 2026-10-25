@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 import subprocess
 import threading
@@ -261,6 +262,13 @@ def test_a_turn_offers_its_env_servers_tools_and_bash(client, env):
 
     assert set(tools) == {"add_item", "count", "explode", "whoami", "bash"}
     assert (tools["add_item"]["server"], "server" in tools["bash"]) == ("items", False)
+    assert tools["bash"] == {
+        "name": "bash",
+        "description": "Run a bash command where the agent works, as its user, in its folder; returns its stdout, "
+                       "then its stderr.",
+        "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "The command."}},
+                         "required": ["command"]},
+    }
     assert tools["add_item"]["input_schema"]["properties"]["item"]["type"] == "string"
 
 
@@ -355,9 +363,25 @@ def test_a_bash_action_runs_in_the_proxys_folder_and_returns_a_structured_result
     (tmp_path / "inputs").mkdir()
     task_id = _send(client, "go")
 
-    result = _done(client, task_id, "b1", _bash("ls; echo out; echo err >&2; exit 3"))
+    result = _done(client, task_id, "b1", _bash("ls; echo $0; echo out; echo err >&2; exit 3"))
 
-    assert result == {"kind": "bash", "exit_code": 3, "stdout": "inputs\nout\n", "stderr": "err\n", "timed_out": False}
+    assert result == {
+        "kind": "bash", "exit_code": 3, "stdout": "inputs\nbash\nout\n", "stderr": "err\n", "timed_out": False}
+
+
+def test_where_there_is_no_bash_the_bash_tool_runs_sh_and_says_so(monkeypatch, tmp_path):
+    which = shutil.which
+    monkeypatch.setattr(proxy.shutil, "which", lambda name, *args, **kwargs: None if name == "bash" else which(name, *args, **kwargs))
+    monkeypatch.chdir(tmp_path)
+    with TestClient(ProxyAgent(long_poll_seconds=0.2).create_app()) as client:
+        assert client.post("/ext/proxy/claim", json={"token": TOKEN}).status_code == 200
+        task_id = _send(client, "go")
+
+        tools = {item["name"]: item for item in _proxy(client, "tools", task_id=task_id).json()["tools"]}
+        result = _done(client, task_id, "s1", _bash("echo $0"))
+
+    assert "with POSIX sh: this place has no bash" in tools["bash"]["description"]
+    assert (result["exit_code"], result["stdout"]) == (0, "sh\n")
 
 
 def test_an_action_done_within_the_long_poll_answers_at_once_and_a_slow_one_is_polled(client):

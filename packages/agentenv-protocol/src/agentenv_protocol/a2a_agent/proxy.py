@@ -75,6 +75,11 @@ BASH_TOOL = ProxyTool(
     input_schema={"type": "object", "properties": {"command": {"type": "string", "description": "The command."}},
                   "required": ["command"]},
 )
+BASH_TOOL_ON_SH = BASH_TOOL.model_copy(update={
+    "description": "Run a command where the agent works, as its user, in its folder, with POSIX sh: this place has "
+                   "no bash, so bash-only syntax such as [[ ]], arrays or <(...) fails. Returns its stdout, then its "
+                   "stderr.",
+})
 
 
 class ProxyConfig(AgentConfig):
@@ -127,10 +132,12 @@ EXTENSIONS = (MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), PROXY_V1)
 @a2a_agent(identity=IDENTITY, config=ProxyConfig, extensions=EXTENSIONS, lifespan=stopping_actions)
 class ProxyAgent(AgentEnvAgent):
     """``shell=False`` is a proxy for an agent that works in no sandbox: it offers no ``bash`` and keeps no skills.
+    Where there is no ``bash``, its ``bash`` runs commands with ``sh``, as the tool's description says.
     ``long_poll_seconds`` bounds how long ``next``, ``act`` and ``result`` wait for something to report."""
 
     def __init__(self, *, shell: bool = True, long_poll_seconds: float = LONG_POLL_SECONDS):
         self._shell = shell
+        self._program = "bash" if shutil.which("bash") else "sh"
         self._long_poll_seconds = long_poll_seconds
         self._token: bytes | None = None
         self._turns: dict[str, _Turn] = {}
@@ -282,7 +289,7 @@ class ProxyAgent(AgentEnvAgent):
         name are refused."""
         async with turn.listing:
             if turn.tools is None:
-                offered = {BASH: BASH_TOOL} if self._shell else {}
+                offered = {BASH: BASH_TOOL if self._program == "bash" else BASH_TOOL_ON_SH} if self._shell else {}
                 for server in turn.servers:
                     try:
                         listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
@@ -330,7 +337,7 @@ class ProxyAgent(AgentEnvAgent):
         if isinstance(action, ProxyBashAction):
             timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
             try:
-                result = await _run(action.command, timeout)
+                result = await _run(self._program, action.command, timeout)
             except OSError as e:
                 # As a shell reports a command it can't execute: an argument list too long, say.
                 result = ProxyBashResult(exit_code=126, stdout="", stderr=f"error: the command couldn't start: {e}\n",
@@ -522,11 +529,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _run(command: str, timeout: float) -> ProxyBashResult:
+async def _run(program: str, command: str, timeout: float) -> ProxyBashResult:
     """Run ``command`` in a process group of its own, stopped with whatever it started if it isn't done within
     ``timeout``, or if the call is cancelled, even when ``bash`` has exited and a child it left holds the output open."""
     process = await asyncio.create_subprocess_exec(
-        "bash", "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        program, "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True,
     )
     try:
