@@ -554,6 +554,7 @@ async def _run(program: str, command: str, timeout: float) -> tuple[ProxyBashRes
     readers = [asyncio.create_task(_read(process.stdout, stdout)), asyncio.create_task(_read(process.stderr, stderr))]
     try:
         await asyncio.wait_for(_exited(process), timeout)
+        await asyncio.wait(readers, timeout=OUTPUT_GRACE_SECONDS)
     except BaseException as e:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
@@ -563,7 +564,6 @@ async def _run(program: str, command: str, timeout: float) -> tuple[ProxyBashRes
         if isinstance(e, asyncio.TimeoutError):
             return ProxyBashResult(exit_code=None, stdout="", stderr="", timed_out=True), []
         raise
-    await asyncio.wait(readers, timeout=OUTPUT_GRACE_SECONDS)
     result = ProxyBashResult(exit_code=process.returncode, stdout=stdout.take(), stderr=stderr.take(), timed_out=False)
     return result, [reader for reader in readers if not reader.done()]
 

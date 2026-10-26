@@ -490,6 +490,19 @@ def test_a_turn_that_closes_stops_its_running_actions_and_forgets_them(client, t
     assert _proxy(client, "act", task_id=task_id, action_id="new", action=_bash("true")).status_code == 404
 
 
+def test_a_turn_that_closes_while_a_done_commands_output_is_awaited_stops_what_it_left(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy, "OUTPUT_GRACE_SECONDS", 30)
+    task_id = _send(client, "go")
+    assert _proxy(client, "act", task_id=task_id, action_id="left",
+                  action=_bash("sleep 60 & echo $! > child")).json()["done"] is False
+
+    _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "done"}])
+    _settled(client, task_id)
+
+    _stopped(int((tmp_path / "child").read_text()))
+    assert _proxy(client, "result", action_id="left").status_code == 404
+
+
 def test_a_proxy_without_a_shell_offers_no_bash_and_keeps_no_skills():
     with TestClient(ProxyAgent(shell=False, long_poll_seconds=0.2).create_app()) as client:
         client.post("/ext/proxy/claim", json={"token": TOKEN})
