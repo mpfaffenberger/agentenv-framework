@@ -174,6 +174,22 @@ class Runtime(Protocol):
         """Cancel every turn still running: the server is shutting down."""
         ...
 
+    def check_messages(self, data: bytes) -> None:
+        """Raise ValueError unless ``data`` is a conversation's messages as the runtime saves them, so a snapshot that
+        holds anything else is refused before it replaces a conversation."""
+        ...
+
+
+async def to_completion(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """``function(*args, **kwargs)`` in a thread, run to its end: cancelled meanwhile, this waits for the thread before it
+    re-raises, so the locks its caller holds stay held until the files the thread writes are written."""
+    work = asyncio.ensure_future(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        await asyncio.wait([work])
+        raise
+
 
 async def _detail_body(_request: Request, exc: HTTPException) -> Response:
     """An ``HTTPException`` as the ``{"detail": ...}`` body agent-env reads errors from."""
@@ -274,14 +290,15 @@ def _replace_contents(directory: Path, staging: Path) -> None:
     staging.rmdir()
 
 
-def _stage_conversation(archive: Path, conversations_dir: Path, target: Path) -> Path:
+def _stage_conversation(
+    archive: Path, conversations_dir: Path, target: Path, check: Callable[[bytes], None]
+) -> Path:
     """The archived conversation extracted beside the others, its messages naming the files attached in it under
-    ``target``, where it goes, rather than where it was saved from. Raises ValueError for an archive that holds no
-    conversation."""
+    ``target``, where it goes, rather than where it was saved from. Raises ValueError for an archive whose messages
+    ``check`` refuses."""
     staging = _extract(archive, conversations_dir)
     try:
-        if not isinstance(json.loads((staging / MESSAGES).read_text()), list):
-            raise ValueError("its messages are not a list")
+        check((staging / MESSAGES).read_bytes())
         source = staging / SOURCE
         saved_from = json.loads(source.read_text())["directory"] if source.is_file() else None
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -470,13 +487,13 @@ class PydanticAIAgent(AgentEnvAgent):
             async with self._holding(conversation), self._workspace_lock:
                 if not (directory / MESSAGES).is_file():
                     raise HTTPException(status_code=404, detail=f"No conversation for context '{request.context_id}'")
-                await asyncio.to_thread(_pack, directory, conversation_archive, record_source=True)
+                await to_completion(_pack, directory, conversation_archive, record_source=True)
                 if request.objects.workspace is not None:
                     # Tasks in other contexts work in the same workspace: those running end first, and new ones wait
                     # for the lock this holds.
                     await self._idle.wait()
                     self.workspace.mkdir(parents=True, exist_ok=True)
-                    await asyncio.to_thread(_pack, self.workspace, workspace_archive)
+                    await to_completion(_pack, self.workspace, workspace_archive)
             objects = {"trajectory": (await upload(request.objects.trajectory, conversation_archive)).model_dump(mode="json")}
             if request.objects.workspace is not None:
                 objects["workspace"] = (await upload(request.objects.workspace, workspace_archive)).model_dump(mode="json")
@@ -497,7 +514,7 @@ class PydanticAIAgent(AgentEnvAgent):
                     raise HTTPException(status_code=409, detail="a task is running; restore the workspace once it finishes")
                 target = self.conversations_dir / conversation_id(context_id)
                 try:
-                    await asyncio.to_thread(self._restore, conversation_archive, workspace_archive, target)
+                    await to_completion(self._restore, conversation_archive, workspace_archive, target)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"context_id": context_id}
@@ -506,7 +523,7 @@ class PydanticAIAgent(AgentEnvAgent):
         """Extract both archives and check the conversation before putting either in place: one that fails to
         extract, or holds no conversation, changes nothing."""
         self.conversations_dir.mkdir(parents=True, exist_ok=True)
-        conversation = _stage_conversation(conversation_archive, self.conversations_dir, target)
+        conversation = _stage_conversation(conversation_archive, self.conversations_dir, target, self.runtime.check_messages)
         staged = [conversation]
         try:
             if workspace_archive is not None:

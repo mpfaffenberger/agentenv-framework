@@ -20,7 +20,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness import Skills
 from pydantic_ai_harness.coder import Coder
 
-from pydantic_ai_agent import MESSAGES, Outcome, Turn
+from pydantic_ai_agent import MESSAGES, Outcome, Turn, to_completion
 
 # Consecutive retries a tool gets for arguments it refuses, as many as Coder gives its file tools, so a model that
 # fumbles a command twice doesn't end the task.
@@ -124,6 +124,9 @@ class PydanticAIRuntime:
             run.cancel()
         await asyncio.gather(*runs, return_exceptions=True)
 
+    def check_messages(self, data: bytes) -> None:
+        ModelMessagesTypeAdapter.validate_json(data)
+
     async def run(self, turn: Turn) -> Outcome:
         task = asyncio.current_task()
         self._runs.add(task)
@@ -162,5 +165,6 @@ class PydanticAIRuntime:
         messages = result.all_messages()
         for event in _events(messages[recorded:]):
             turn.on_event(event)
-        await asyncio.to_thread(_save, turn, messages)
+        # A turn whose run finished is saved whole even if it is cancelled meanwhile, before its locks are let go.
+        await to_completion(_save, turn, messages)
         return Outcome(result.output.strip() or "The agent finished without a reply.", _usage(result.usage))

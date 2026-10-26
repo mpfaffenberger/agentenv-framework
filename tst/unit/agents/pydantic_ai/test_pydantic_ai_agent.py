@@ -49,6 +49,11 @@ class FakeRuntime:
     async def stop(self) -> None:
         self.stopped = True
 
+    def check_messages(self, data: bytes) -> None:
+        messages = json.loads(data)
+        if not isinstance(messages, list) or not all(isinstance(message, str) for message in messages):
+            raise ValueError("not this runtime's messages")
+
     async def run(self, turn: Any) -> Outcome:
         self.turns.append(turn)
         turn.on_event({"kind": "request", "parts": [{"part_kind": "user-prompt", "content": turn.text}]})
@@ -474,7 +479,8 @@ def test_a_snapshot_loaded_on_an_agent_with_another_home_names_its_attached_file
     ("README", b""),
     ("messages.json", b"{not json"),
     ("messages.json", b'{"kind": "request"}'),
-], ids=["no-messages", "unparseable", "not-a-list"])
+    ("messages.json", b"[{}]"),
+], ids=["no-messages", "unparseable", "not-a-list", "not-the-runtimes-messages"])
 def test_a_snapshot_that_holds_no_conversation_changes_nothing(
     client: TestClient, tmp_path: Path, objects: dict[str, bytes], member: str, content: bytes
 ) -> None:
@@ -619,3 +625,26 @@ def test_the_image_copies_every_module_the_agent_imports() -> None:
     sources = {path.name for path in AGENT_DIR.iterdir() if path.suffix in {".py", ".sh", ".txt"}}
 
     assert set(copied.split()[1:-1]) == sources
+
+
+def test_a_threaded_write_cancelled_midway_finishes_before_the_cancel_reaches_its_caller() -> None:
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def write() -> None:
+        started.set()
+        release.wait(5)
+        finished.set()
+
+    async def cancel_midway() -> bool:
+        task = asyncio.ensure_future(pydantic_ai_agent.to_completion(write))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.1)
+        still_waiting = not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return still_waiting
+
+    assert asyncio.run(cancel_midway())
+    assert finished.is_set()
