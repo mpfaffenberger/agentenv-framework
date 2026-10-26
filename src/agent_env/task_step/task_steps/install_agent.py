@@ -17,7 +17,7 @@ import json
 import logging
 import shlex
 from datetime import datetime, timezone
-from typing import Callable, ClassVar, Optional
+from typing import Callable, ClassVar, NamedTuple, Optional
 
 import httpx
 
@@ -45,6 +45,15 @@ REQUIRED_PARAMS_HOST_KEY = "required_params_host"
 A2A_PORT_KEY = "a2a_port"
 WORKDIR_HOST_KEY = "workdir_host"
 USER_HOST_KEY = "user_host"
+# The per-step param that installs this agent in place of the step's own, as an episode plays it through a proxy.
+PROXY_PARAM = "proxy"
+
+
+class HostPlace(NamedTuple):
+    """Where an agent works on a VM's host, and as which user."""
+
+    workdir: str
+    user: str
 
 
 def _install_problem(agent: A2AAgent) -> str | None:
@@ -68,7 +77,7 @@ def _build_param_resolvers(
     litellm_api_key_override: Optional[str] = None,
     sandbox_type: Optional[str] = None,
     trust_lines: str = "",
-    place: Optional[dict[str, str]] = None,
+    replaced: Optional[HostPlace] = None,
 ) -> dict[str, Callable[[], str]]:
     """Per-install registry: required_params name -> zero-arg resolver returning the raw value.
 
@@ -89,13 +98,13 @@ def _build_param_resolvers(
             )
         return workspace_dir
 
-    def _placed(name: str) -> str:
-        if place is None:
+    def _replaced(field: str) -> str:
+        if replaced is None:
             raise KeyError(
-                f"agent declares required_param {name!r}, which only an install in another agent's place "
-                "(the step's `proxy` param) gives"
+                f"agent declares required_param 'host_{field}', which only an install in another agent's place "
+                f"(the step's `{PROXY_PARAM}` param) gives"
             )
-        return place[name]
+        return getattr(replaced, field)
 
     def _resolve_container() -> str:
         if container_name is None:
@@ -114,8 +123,8 @@ def _build_param_resolvers(
         "agent_name":     lambda: agent_name,
         "workspace_dir":  _resolve_workspace_dir,
         # Where the agent an install replaces works on the VM host, and as which user.
-        "workdir":        lambda: _placed("workdir"),
-        "user":           lambda: _placed("user"),
+        "host_workdir":   lambda: _replaced("workdir"),
+        "host_user":      lambda: _replaced("user"),
         # Config-sourced (from agent-env config)
         "litellm_api_key":   lambda: (config.resolve_reference(litellm_api_key_override) if litellm_api_key_override
                                       else config.get_litellm_api_key()),
@@ -245,16 +254,14 @@ class InstallAgentTaskStep(TaskStep):
         sandbox = await provider.get_sandbox(ds.sandbox_id)
 
         user_overrides = context.metadata.get("user_overrides", {})
-        agent = A2AAgent.get(*self._agent_ref(context))
-        if problem := _install_problem(agent):
+        named = A2AAgent.get(*self._agent_ref(context))
+        if problem := _install_problem(named):
             raise RuntimeError(problem)
-        place = None
-        if proxy := self.step_param_overrides(context).get("proxy"):
-            if self.container_name is None:
-                place = await self._place_of(sandbox, agent)
-            agent = A2AAgent.get(proxy)
-            if problem := _install_problem(agent):
-                raise RuntimeError(problem)
+        proxy = self.step_param_overrides(context).get(PROXY_PARAM)
+        replaced = await self._host_place_of(sandbox, named) if proxy and self.container_name is None else None
+        agent = A2AAgent.get(proxy) if proxy else named
+        if proxy and (problem := _install_problem(agent)):
+            raise RuntimeError(problem)
 
         logger.info(f"Loading agent image {agent.docker_image_artifact.image_name} onto VM (needed to read agent card)...")
         await sandbox.load_docker_images([agent.docker_image_artifact])
@@ -313,7 +320,7 @@ class InstallAgentTaskStep(TaskStep):
             # A host install on a local sandbox runs on this machine itself, not in a container.
             sandbox_type=None if host_mode else sandbox.type,
             trust_lines=trust_lines,
-            place=place,
+            replaced=replaced,
         )
         resolved: dict[str, str] = {}
         for name in required_params:
@@ -361,7 +368,7 @@ class InstallAgentTaskStep(TaskStep):
             a2a_card=agent_card,
             instance_id=deployed.instance_id,
             on_host=host_mode,
-            container_name=container,
+            installed_container=container,
         ))
 
         default_model = agent.metadata.get("default_model") or get_config().get_model_for_role("agent")
@@ -388,7 +395,7 @@ class InstallAgentTaskStep(TaskStep):
             env = trust_env(directory)
         return "".join(f"{name}={shlex.quote(value)}\n" for name, value in env.items())
 
-    async def _place_of(self, sandbox, agent: A2AAgent) -> dict[str, str]:
+    async def _host_place_of(self, sandbox, agent: A2AAgent) -> HostPlace:
         """Where ``agent``, which a proxy replaces, works on the VM host and as which user: its install/v1 params
         ``workdir_host`` and ``user_host``, templates of ``{agent_name}`` as its install commands are. In a container
         no place is read: the proxy works there as root in the container's working directory, as an agent does."""
@@ -401,13 +408,13 @@ class InstallAgentTaskStep(TaskStep):
         await sandbox.load_docker_images([agent.docker_image_artifact])
         install_ext = await self._extract_install_extension(sandbox, agent.docker_image_artifact.image_name)
         params = install_ext.get("params") or {}
-        place = {"workdir": params.get(WORKDIR_HOST_KEY), "user": params.get(USER_HOST_KEY)}
-        if not all(isinstance(value, str) and value for value in place.values()):
+        workdir, user = params.get(WORKDIR_HOST_KEY), params.get(USER_HOST_KEY)
+        if not all(isinstance(value, str) and value for value in (workdir, user)):
             raise RuntimeError(
                 f"Agent {agent.id} v{agent.version} install/v1 params don't say where it works on the VM host: a "
                 f"proxy installed in its place needs '{WORKDIR_HOST_KEY}' and '{USER_HOST_KEY}'"
             )
-        return {name: value.format(agent_name=self.agent_name) for name, value in place.items()}
+        return HostPlace(workdir.format(agent_name=self.agent_name), user.format(agent_name=self.agent_name))
 
     def _register_instance(self, agent, a2a_url: str, ds, agent_card: dict):
         """Register the installed agent in the instance store, same as A2AAgent.deploy(),

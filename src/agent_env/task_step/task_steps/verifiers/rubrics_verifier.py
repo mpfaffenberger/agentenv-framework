@@ -751,7 +751,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_sandbox_id = agent.sandbox_id
                 judge_agent_card = agent.a2a_card or {}
                 judge_agent = agent
-                judge_container = agent.container_name
+                judge_container = agent.installed_container
             else:
                 from agent_env.a2a_agent import A2AAgent
                 from agent_env.config import get_config

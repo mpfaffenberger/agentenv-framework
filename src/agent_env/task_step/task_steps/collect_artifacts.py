@@ -781,7 +781,7 @@ class CollectArtifactsTaskStep(TaskStep):
         # An agent installed on a VM's host has no container: its files are on the host. One installed into a
         # container works in that one.
         container = (
-            agent.container_name or await find_agent_container(sandbox)
+            agent.installed_container or await find_agent_container(sandbox)
             if sandbox.mode == SANDBOX_MODE_VM and not agent.on_host
             else None
         )

@@ -518,7 +518,7 @@ class LoadArtifactTaskStep(TaskStep):
                     deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
                     destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
                     files = await A2AAgent.load_file_artifact_universe(
-                        deployed_agent, artifact, destination, **into_container(agent.container_name))
+                        deployed_agent, artifact, destination, **into_container(agent.installed_container))
                     context.metadata.setdefault("loaded_file_artifact_universes", []).append({
                         "id": artifact.id,
                         "version": artifact.version,
@@ -560,7 +560,7 @@ class LoadArtifactTaskStep(TaskStep):
                             else get_agent_sandbox_provider()
                         )
                         sandbox = await provider.get_sandbox(agent.sandbox_id)
-                        container = agent.container_name or (
+                        container = agent.installed_container or (
                             sandbox.container_name if isinstance(sandbox, VmSandbox) else None)
                     destination = (destination_path or "/app/files").rstrip("/") or "/"
                     files = await _stage_environment_payload_into_container(
@@ -613,7 +613,7 @@ class LoadArtifactTaskStep(TaskStep):
                 gateway_url = reachable_url(require_gateway_url(deployed, "Installing a CliArtifact"),
                                             from_sandbox_type=deployed.sandbox_type, to_sandbox_type=agent.sandbox_type)
                 install_path = await A2AAgent.install_cli(
-                    deployed_agent, artifact, gateway_url, **into_container(agent.container_name))
+                    deployed_agent, artifact, gateway_url, **into_container(agent.installed_container))
                 agent_clis = context.metadata.setdefault("installed_clis", {}).setdefault(self.agent_name, {})
                 agent_clis[artifact.id] = {
                     "install_path": install_path,
@@ -636,7 +636,7 @@ class LoadArtifactTaskStep(TaskStep):
                     else get_agent_sandbox_provider()
                 )
                 sandbox = await provider.get_sandbox(agent.sandbox_id)
-                agent_container = agent.container_name
+                agent_container = agent.installed_container
             destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
             semaphore = asyncio.Semaphore(8)
 

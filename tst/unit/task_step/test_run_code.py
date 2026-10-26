@@ -663,7 +663,7 @@ async def test_host_installed_agent_on_a_vm_runs_on_the_host():
 async def test_an_agent_on_a_vm_runs_the_script_in_the_container_it_was_installed_in(installed_in, expected):
     ctx = _make_context()
     ctx.deployed_agents[0].sandbox_type = "modal_vm"
-    ctx.deployed_agents[0].container_name = installed_in
+    ctx.deployed_agents[0].installed_container = installed_in
     sandbox = _vm_sandbox_mock()
     provider = MagicMock()
     provider.get_sandbox = AsyncMock(return_value=sandbox)

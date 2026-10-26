@@ -40,10 +40,10 @@ def _provide(monkeypatch, sandbox):
         monkeypatch.setattr(module, "get_sandbox_provider", lambda: provider)
 
 
-def _agent_context(on_host: bool = False, container_name: str | None = None):
+def _agent_context(on_host: bool = False, installed_container: str | None = None):
     ctx = TaskStepContext()
     ctx.deployed_agents = [DeployedAgent(agent_name="solver", api_url="http://x", sandbox_id="sb-1", on_host=on_host,
-                                         container_name=container_name)]
+                                         installed_container=installed_container)]
     return ctx
 
 

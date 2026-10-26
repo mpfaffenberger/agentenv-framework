@@ -30,7 +30,7 @@ def test_the_card_offers_the_proxy_and_an_install_on_a_host_or_into_a_container(
 
 @pytest.mark.parametrize(("commands", "required", "container", "script"), [
     ("install_commands_host", "required_params_host", None,
-     "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} {workdir} {user}"),
+     "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} {host_workdir} {host_user}"),
     ("install_commands", "required_params", "task", "bash {work_dir}/agent/install.sh container {container} {a2a_port}"),
 ])
 def test_each_install_asks_only_for_params_install_agent_supplies_and_runs_the_folders_script(commands, required,

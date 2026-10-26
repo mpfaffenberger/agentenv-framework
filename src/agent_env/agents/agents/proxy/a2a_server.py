@@ -5,9 +5,9 @@ from agentenv_protocol.a2a_agent import INSTALL_V1, a2a_agent, enable
 from agentenv_protocol.a2a_agent.proxy import EXTENSIONS, IDENTITY, ProxyAgent, ProxyConfig, stopping_actions
 
 _UNPACK = "mkdir -p {work_dir}/agent && tar -xzf {agent_ctx_tar} -C {work_dir}/agent"
-# In the place of the agent it replaces: on a VM's host, its {workdir} as its {user}; in a container, as root in the
+# In the place of the agent it replaces: on a VM's host, its {host_workdir} as its {host_user}; in a container, as root in the
 # container's working directory, as an agent installed there works.
-_INSTALL_COMMANDS_HOST = [_UNPACK, "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} {workdir} {user}"]
+_INSTALL_COMMANDS_HOST = [_UNPACK, "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} {host_workdir} {host_user}"]
 _INSTALL_COMMANDS = [_UNPACK, "bash {work_dir}/agent/install.sh container {container} {a2a_port}"]
 
 
@@ -19,7 +19,7 @@ _INSTALL_COMMANDS = [_UNPACK, "bash {work_dir}/agent/install.sh container {conta
         enable(INSTALL_V1, install_commands=_INSTALL_COMMANDS,
                required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port"],
                install_commands_host=_INSTALL_COMMANDS_HOST,
-               required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", "workdir", "user"],
+               required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", "host_workdir", "host_user"],
                a2a_port=8000),
     ),
     lifespan=stopping_actions,

@@ -11,6 +11,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import bound_deployment, live_mcp_url
+from agent_env.task_step.task_steps.install_agent import PROXY_PARAM
 
 # The agents bundle's proxy, deployed in the place of an agent an episode plays.
 PROXY_AGENT_ID = "@local/agentenv-framework/agents/proxy"
@@ -55,7 +56,7 @@ class _EpisodeAgentStep(TaskStep):
                 await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields)
             return context
         await asyncio.to_thread(write_installed, PROXY_AGENT_ID)
-        override = {"a2a_agent_id": PROXY_AGENT_ID} if self.step.type == "deploy_agent" else {"proxy": PROXY_AGENT_ID}
+        override = {"a2a_agent_id": PROXY_AGENT_ID} if self.step.type == "deploy_agent" else {PROXY_PARAM: PROXY_AGENT_ID}
         step_params = context.metadata.setdefault("user_overrides", {}).setdefault("step_params", {})
         step_params[self.step.id] = {**step_params.get(self.step.id, {}), **override}
         context = await self.step.execute(context)

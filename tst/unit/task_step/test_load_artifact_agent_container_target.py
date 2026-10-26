@@ -77,7 +77,7 @@ def staged(monkeypatch):
     return seen
 
 
-def _context_with_agent(monkeypatch, sandbox, container_name: str | None = None) -> TaskStepContext:
+def _context_with_agent(monkeypatch, sandbox, installed_container: str | None = None) -> TaskStepContext:
     async def _get_sandbox(sandbox_id):
         return sandbox
 
@@ -92,7 +92,7 @@ def _context_with_agent(monkeypatch, sandbox, container_name: str | None = None)
     ctx.deployed_agents = [
         DeployedAgent(
             agent_name="solver", api_url="http://agent", sandbox_id=sandbox.sandbox_id,
-            sandbox_type=sandbox.type, container_name=container_name,
+            sandbox_type=sandbox.type, installed_container=installed_container,
         )
     ]
     return ctx

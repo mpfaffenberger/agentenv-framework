@@ -191,7 +191,7 @@ async def _load_into_agent(monkeypatch, installed_in: str | None, **load) -> lis
                                                                                          sandbox_id="sb-agent")))
     context = TaskStepContext()
     context.deployed_agents = [DeployedAgent(agent_name="solver", api_url="https://agent", sandbox_id="sb-agent",
-                                             instance_id="inst-1", container_name=installed_in)]
+                                             instance_id="inst-1", installed_container=installed_in)]
     await LoadArtifactTaskStep(id="stage", version=None, agent_name="solver", **load).execute(context)
     return _unstaged(sandbox.scripts)
 
