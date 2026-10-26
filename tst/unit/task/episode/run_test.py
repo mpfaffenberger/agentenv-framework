@@ -10,7 +10,18 @@ import pytest
 import pytest_asyncio
 import uvicorn
 from agentenv_protocol import EnvironmentTool, ToolResult, ToolSessionError
-from agentenv_protocol.a2a_agent import AgentEnvAgent, AgentIdentity, TaskRequest, TaskResult, a2a_agent
+from agentenv_protocol.a2a_agent import (
+    AgentEnvAgent,
+    AgentIdentity,
+    ProxyBashAction,
+    ProxyBashResult,
+    ProxyTextPart,
+    ProxyTool,
+    ProxyToolResult,
+    TaskRequest,
+    TaskResult,
+    a2a_agent,
+)
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 import agent_env.task.episode.run as episode_run
@@ -624,17 +635,17 @@ class _SandboxedProxy:
         self.replies = []
 
     async def tools(self, task_id):
-        return [{"name": "items_add_item", "server": "items"}, {"name": "bash", "description": "Run a command."}]
+        return [ProxyTool(name="items_add_item", server="items"), ProxyTool(name="bash", description="Run a command.")]
 
     async def act(self, task_id, action):
         self.actions.append(action)
-        if action["kind"] == "bash":
-            return self.results.get(action["command"]) or {
-                "kind": "bash", "exit_code": 0, "stdout": f"ran {action['command']}\n", "stderr": "", "timed_out": False}
-        return {"kind": "tool", "content": [{"type": "text", "text": "added"}], "is_error": False}
+        if isinstance(action, ProxyBashAction):
+            return self.results.get(action.command) or ProxyBashResult(
+                exit_code=0, stdout=f"ran {action.command}\n", stderr="", timed_out=False)
+        return ProxyToolResult(content=[{"type": "text", "text": "added"}], is_error=False)
 
-    async def reply(self, task_id, **reply):
-        self.replies.append((task_id, reply))
+    async def reply(self, task_id, *, parts=None, error=None):
+        self.replies.append((task_id, parts, error))
         return True
 
 
@@ -645,10 +656,9 @@ def _sandboxed_turn(proxy):
 
 @pytest.mark.asyncio
 async def test_a_turn_in_the_agents_sandbox_offers_bash_and_shows_its_output_and_a_failed_exit():
-    proxy = _SandboxedProxy({"slow": {"kind": "bash", "stdout": "", "stderr": "", "timed_out": True},
-                             "both": {"kind": "bash", "exit_code": 2, "stdout": "out\n", "stderr": "err\n",
-                                      "timed_out": False},
-                             "quiet": {"kind": "bash", "exit_code": 1, "stdout": "", "stderr": "", "timed_out": False}})
+    proxy = _SandboxedProxy({"slow": ProxyBashResult(stdout="", stderr="", timed_out=True),
+                             "both": ProxyBashResult(exit_code=2, stdout="out\n", stderr="err\n", timed_out=False),
+                             "quiet": ProxyBashResult(exit_code=1, stdout="", stderr="", timed_out=False)})
 
     async with _sandboxed_turn(proxy).tools() as tools:
         assert [tool.name for tool in tools.list()] == ["items_add_item", "bash"]
@@ -663,10 +673,11 @@ async def test_a_turn_in_the_agents_sandbox_offers_bash_and_shows_its_output_and
     assert [(result.isError, result.text) for result in (ran, both, quiet, timed_out)] == [
         (False, "ran ls inputs\n"), (True, "out\nerr\nexit code 2"), (True, "exit code 1"),
         (True, "error: the command timed out")]
-    assert proxy.actions == [{"kind": "bash", "command": "ls inputs"}, {"kind": "bash", "command": "both"},
-                             {"kind": "bash", "command": "quiet"}, {"kind": "bash", "command": "slow"},
-                             {"kind": "tool", "server": "items", "name": "items_add_item",
-                              "arguments": {"name": "crate"}, "timeout_seconds": 600.0}]
+    assert [action.model_dump(exclude_none=True) for action in proxy.actions] == [
+        {"kind": "bash", "command": "ls inputs"}, {"kind": "bash", "command": "both"},
+        {"kind": "bash", "command": "quiet"}, {"kind": "bash", "command": "slow"},
+        {"kind": "tool", "server": "items", "name": "items_add_item", "arguments": {"name": "crate"},
+         "timeout_seconds": 600.0}]
 
 
 @pytest.mark.asyncio
@@ -677,7 +688,7 @@ async def test_a_turn_ends_with_its_reply_as_parts():
     await turn.end("Added a crate.")
     await turn.end("Again.")
 
-    assert proxy.replies == [("t-1", {"parts": [{"kind": "text", "text": "Added a crate."}]})]
+    assert proxy.replies == [("t-1", [ProxyTextPart(text="Added a crate.")], None)]
 
 
 @pytest.mark.asyncio

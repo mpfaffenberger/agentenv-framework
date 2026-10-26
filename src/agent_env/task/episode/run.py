@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from agentenv_protocol import EnvironmentTool, ToolResult
+from agentenv_protocol.a2a_agent import (
+    ProxyBashAction,
+    ProxyBashResult,
+    ProxySkill,
+    ProxyTextPart,
+    ProxyToolAction,
+)
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
@@ -30,13 +36,8 @@ class EpisodeError(RuntimeError):
     """A task that can't run as an episode, or an episode asked for what it can't give."""
 
 
-@dataclass(frozen=True)
-class Skill:
-    """A skill the task gave the agent: its instructions are ``path``'s ``SKILL.md``, in the agent's sandbox."""
-
-    name: str
-    description: str
-    path: str
+# A skill the task gave the agent: its instructions are ``path``'s ``SKILL.md``, in the agent's sandbox.
+Skill = ProxySkill
 
 
 class Turn:
@@ -79,7 +80,7 @@ class Turn:
         if not self._open:
             return
         try:
-            await self._checked(self._proxy.reply(self._task_id, parts=[{"kind": "text", "text": response or ""}]))
+            await self._checked(self._proxy.reply(self._task_id, parts=[ProxyTextPart(text=response or "")]))
         except httpx.HTTPError as e:
             logger.warning("turn %r of agent %r: its reply didn't reach the proxy: %s", self.step_id, self.agent, e)
         self._open = False
@@ -121,9 +122,8 @@ class TurnTools:
 
     async def __aenter__(self) -> TurnTools:
         for tool in await self._turn._checked(self._turn._proxy.tools(self._turn._task_id)):
-            self._tools.append(EnvironmentTool(name=tool["name"], description=tool.get("description"),
-                                               inputSchema=tool.get("input_schema")))
-            self._servers[tool["name"]] = tool.get("server")
+            self._tools.append(EnvironmentTool(name=tool.name, description=tool.description, inputSchema=tool.input_schema))
+            self._servers[tool.name] = tool.server
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -138,19 +138,19 @@ class TurnTools:
         if (server := self._servers[name]) is None:
             if not isinstance(command := (arguments or {}).get("command"), str):
                 raise EpisodeError(f"tool {name!r} takes a command string, not {command!r}")
-            action = {"kind": "bash", "command": command}
+            action: ProxyBashAction | ProxyToolAction = ProxyBashAction(kind="bash", command=command)
         else:
-            action = {"kind": "tool", "server": server, "name": name, "arguments": arguments or {},
-                      "timeout_seconds": self._timeout}
+            action = ProxyToolAction(kind="tool", server=server, name=name, arguments=arguments or {},
+                                     timeout_seconds=self._timeout)
         result = await self._turn._checked(self._turn._proxy.act(self._turn._task_id, action))
-        if result["kind"] == "bash":
-            if result["timed_out"]:
+        if isinstance(result, ProxyBashResult):
+            if result.timed_out:
                 return ToolResult(content=[{"type": "text", "text": "error: the command timed out"}], isError=True)
-            text = result["stdout"] + result["stderr"]
-            if failed := result["exit_code"] != 0:
-                text = "\n".join(filter(None, (text.removesuffix("\n"), f"exit code {result['exit_code']}")))
+            text = result.stdout + result.stderr
+            if failed := result.exit_code != 0:
+                text = "\n".join(filter(None, (text.removesuffix("\n"), f"exit code {result.exit_code}")))
             return ToolResult(content=[{"type": "text", "text": text}], isError=failed)
-        return ToolResult(content=result["content"], isError=result["is_error"])
+        return ToolResult(content=result.content, isError=result.is_error)
 
 
 class Episode:
@@ -303,8 +303,8 @@ class Episode:
                 logger.warning("episode %s: reading agent %r's turns failed, retrying: %s", self.id, agent, e)
                 await asyncio.sleep(_DRAIN_RETRY_SECONDS)
                 continue
-            after = answer["version"]
-            listed = {item["task_id"]: item for item in answer["turns"]}
+            after = answer.version
+            listed = {item.task_id: item for item in answer.turns}
             for task_id in [task_id for task_id in open_turns if task_id not in listed]:
                 turn = open_turns.pop(task_id)
                 turn._open = False
@@ -312,10 +312,9 @@ class Episode:
             for task_id, item in listed.items():
                 if task_id not in open_turns:
                     open_turns[task_id] = turn = Turn(
-                        agent=agent, step_id=self._step_of(agent, item["context_id"]),
-                        prompt="\n".join(part["text"] for part in item["parts"]),
-                        system_prompt=item.get("system_prompt"),
-                        skills=[Skill(**skill) for skill in item.get("skills", [])], proxy=proxy, task_id=task_id,
+                        agent=agent, step_id=self._step_of(agent, item.context_id),
+                        prompt="\n".join(part.text for part in item.parts), system_prompt=item.system_prompt,
+                        skills=list(item.skills), proxy=proxy, task_id=task_id,
                     )
                     self._waiting.append(turn)
                     self._turns.add(turn)

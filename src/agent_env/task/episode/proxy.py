@@ -6,11 +6,23 @@ from __future__ import annotations
 import asyncio
 import secrets
 import threading
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import uvicorn
-from agentenv_protocol.a2a_agent import PROXY_V1
+from agentenv_protocol.a2a_agent import (
+    PROXY_V1,
+    ProxyActionState,
+    ProxyBashAction,
+    ProxyBashResult,
+    ProxyNextResponse,
+    ProxyTextPart,
+    ProxyTool,
+    ProxyToolAction,
+    ProxyToolResult,
+    ProxyToolsResponse,
+)
+from pydantic import BaseModel
 from agentenv_protocol.a2a_agent.proxy import ProxyAgent
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
@@ -21,6 +33,7 @@ _SERVE_TIMEOUT_SECONDS = 30.0
 _IN_PROCESS_LONG_POLL_SECONDS = 1.0
 _ATTEMPTS = 3
 _RETRY_SECONDS = 1.0
+_Response = TypeVar("_Response", bound=BaseModel)
 
 
 class ProxyRefused(Exception):
@@ -29,7 +42,8 @@ class ProxyRefused(Exception):
 
 class ProxyClient:
     """One proxy, claimed with a token of this episode's, at the endpoints its card names. A call that doesn't reach
-    the proxy, over a connection a tunnel dropped say, is tried again, except ``record``'s, which isn't idempotent."""
+    the proxy, over a connection a tunnel dropped say, is tried again, except ``record``'s, which isn't idempotent.
+    Answers are read as proxy/v1's models, ignoring fields a newer proxy adds: an agent's protocol isn't pinned."""
 
     def __init__(self, a2a_url: str, card: dict[str, Any]):
         proxy = A2AAgent.find_extension(card, PROXY_V1.uri)
@@ -43,30 +57,36 @@ class ProxyClient:
     async def claim(self) -> None:
         await self._call("claim")
 
-    async def next(self, after: int) -> dict[str, Any]:
-        return await self._call("next", after=after)
+    async def next(self, after: int) -> ProxyNextResponse:
+        return _read(ProxyNextResponse, await self._call("next", after=after))
 
-    async def tools(self, task_id: str) -> list[dict[str, Any]]:
-        return (await self._call("tools", task_id=task_id))["tools"]
+    async def tools(self, task_id: str) -> list[ProxyTool]:
+        return _read(ProxyToolsResponse, await self._call("tools", task_id=task_id)).tools
 
-    async def act(self, task_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    async def act(self, task_id: str, action: ProxyToolAction | ProxyBashAction) -> ProxyBashResult | ProxyToolResult:
         """``action``'s result, once it has run in the turn. A call that didn't reach the proxy is tried again: the
         action's id makes a retry return the action it already started."""
         action_id = secrets.token_hex(16)
-        state = await self._call("act", task_id=task_id, action_id=action_id, action=action)
-        while not state["done"]:
-            state = await self._call("result", action_id=action_id)
-        return state["result"]
+        body = action.model_dump(mode="json", exclude_none=True)
+        state = _read(ProxyActionState, await self._call("act", task_id=task_id, action_id=action_id, action=body))
+        while not state.done:
+            state = _read(ProxyActionState, await self._call("result", action_id=action_id))
+        return state.result
 
     async def record(self, task_id: str, message: str | dict[str, Any], model: str | None,
                      usage: dict[str, Any] | None) -> None:
         _raise_for_status(await self._post("record", {"task_id": task_id, "message": message, "model": model,
                                                       "usage": usage}, attempts=1))
 
-    async def reply(self, task_id: str, **reply: Any) -> bool:
-        """Whether the reply reached an open turn: a turn its sender stopped waiting for is gone, as is one a reply that
-        reached it but whose answer was lost ended."""
-        response = await self._post("reply", {"task_id": task_id, **reply})
+    async def reply(self, task_id: str, *, parts: list[ProxyTextPart] | None = None, error: str | None = None) -> bool:
+        """Whether the reply, its ``parts`` or the turn's ``error``, reached an open turn: a turn its sender stopped
+        waiting for is gone, as is one a reply that reached it but whose answer was lost ended."""
+        body: dict[str, Any] = {"task_id": task_id}
+        if parts is not None:
+            body["parts"] = [part.model_dump(mode="json") for part in parts]
+        if error is not None:
+            body["error"] = error
+        response = await self._post("reply", body)
         if response.status_code == 404:
             return False
         _raise_for_status(response)
@@ -115,6 +135,10 @@ class InProcessProxy:
     def stop(self) -> None:
         """Have it stop; its thread ends once the requests in flight have."""
         self._server.should_exit = True
+
+
+def _read(model: type[_Response], answer: dict[str, Any]) -> _Response:
+    return model.model_validate(answer, extra="ignore")
 
 
 def _raise_for_status(response: httpx.Response) -> None:
