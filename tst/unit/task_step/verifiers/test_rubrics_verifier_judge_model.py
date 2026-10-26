@@ -10,13 +10,22 @@ CRITERIA = [{"id": "c1", "description": "Response says hello"}]
 
 
 @pytest.fixture
-def judge_role(tmp_path, monkeypatch):
-    config = tmp_path / "config.toml"
-    config.write_text('[model]\ndefault = "agent-model"\n\n[model.roles]\njudge = "judge-model"\n')
-    monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
+def model_config(tmp_path, monkeypatch):
+    """Install a config file holding ``model`` as its whole [model] table, so no developer config is read."""
+
+    def install(model: str) -> None:
+        config = tmp_path / "config.toml"
+        config.write_text(f"[model]\n{model}")
+        monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
+        reset_config()
+
+    yield install
     reset_config()
-    yield
-    reset_config()
+
+
+@pytest.fixture
+def judge_role(model_config):
+    model_config('default = "agent-model"\n\n[model.roles]\njudge = "judge-model"\n')
 
 
 def _built(**kwargs) -> RubricsVerifierTaskStep:
@@ -38,5 +47,13 @@ def test_a_model_the_step_names_wins_over_the_judge_role(judge_role):
     assert _built(default_model="named-model").default_model == "named-model"
 
 
-def test_without_a_judge_role_the_judge_is_claude_sonnet():
+def test_without_a_judge_role_the_judge_is_the_configured_default_model(model_config):
+    model_config('default = "agent-model"\n')
+
+    assert _built().default_model == "agent-model"
+
+
+def test_with_no_model_configured_the_judge_is_claude_sonnet(model_config):
+    model_config("")
+
     assert _built().default_model == "claude-sonnet-4-6"
