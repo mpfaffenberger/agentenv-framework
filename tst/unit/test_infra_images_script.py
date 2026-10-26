@@ -62,7 +62,7 @@ def test_plan_only_lists_the_infra_images_or_the_agents_images(script, monkeypat
                        "agents": agents}
     assert "agentenv-gateway" in planned["infra"] and agents == [
         "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-opencode", "agentenv-openhands",
-        "agentenv-pi", "agentenv-proxy"]
+        "agentenv-pi", "agentenv-proxy", "agentenv-pydantic-ai"]
 
 
 def test_plan_missing_lists_the_images_the_registry_lacks_or_refuses_to_show(script, monkeypatch, capsys):
