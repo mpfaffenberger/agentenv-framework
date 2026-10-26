@@ -139,7 +139,7 @@ class ProxyAgent(AgentEnvAgent):
 
     def __init__(self, *, shell: bool = True, long_poll_seconds: float = LONG_POLL_SECONDS):
         self._shell = shell
-        self._program = "bash" if shutil.which("bash") else "sh"
+        self._program, self._bash_tool = ("bash", BASH_TOOL) if shutil.which("bash") else ("sh", BASH_TOOL_ON_SH)
         self._long_poll_seconds = long_poll_seconds
         self._token: bytes | None = None
         self._turns: dict[str, _Turn] = {}
@@ -292,7 +292,7 @@ class ProxyAgent(AgentEnvAgent):
         name are refused."""
         async with turn.listing:
             if turn.tools is None:
-                offered = {BASH: BASH_TOOL if self._program == "bash" else BASH_TOOL_ON_SH} if self._shell else {}
+                offered = {BASH: self._bash_tool} if self._shell else {}
                 for server in turn.servers:
                     try:
                         listed = await asyncio.wait_for(self._listed(turn, server), TOOL_TIMEOUT_SECONDS)
@@ -338,36 +338,38 @@ class ProxyAgent(AgentEnvAgent):
     async def _perform(self, turn: _Turn, action: ProxyToolAction | ProxyBashAction) -> ProxyBashResult | ProxyToolResult:
         started = _now()
         if isinstance(action, ProxyBashAction):
-            timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
-            try:
-                result = await _run(self._program, action.command, timeout, self._draining)
-            except OSError as e:
-                # As a shell reports a command it can't execute: an argument list too long, say.
-                result = ProxyBashResult(exit_code=126, stdout="", stderr=f"error: the command couldn't start: {e}\n",
-                                         timed_out=False)
             name, arguments = BASH, {"command": action.command}
-            output = (f"error: the command timed out after {timeout:g}s" if result.timed_out
-                      else result.stdout + result.stderr)
-            completion = {"output": output, "exit_code": result.exit_code}
-            failed = result.timed_out or result.exit_code != 0
+            result, completion, failed = await self._bash(action)
         else:
-            timeout = action.timeout_seconds or TOOL_TIMEOUT_SECONDS
             name, arguments = action.name, action.arguments
-            try:
-                called = await asyncio.wait_for(self._called(turn, action), timeout)
-                result = ProxyToolResult(content=called.content, is_error=called.isError)
-            except asyncio.TimeoutError:
-                result = _tool_error(f"the tool call timed out after {timeout:g}s")
-            except (ToolSessionError, httpx.HTTPError) as e:
-                result = _tool_error(f"{type(e).__name__}: {e}")
-            text = "\n".join(block["text"] for block in result.content if block.get("type") == "text")
-            completion = {"error": text} if result.is_error else {"output": text}
-            failed = result.is_error
+            result, completion, failed = await self._tool(turn, action)
         span = _span(name, "execute_tool", started, None, prompt={"input": arguments}, completion=completion,
                      failed=failed)
         turn.trajectory.append(span)
         turn.last_event = span["end_time"]
         return result
+
+    async def _bash(self, action: ProxyBashAction) -> tuple[ProxyBashResult, dict[str, Any], bool]:
+        """Run a command; what it left reading output is drained until the proxy stops."""
+        timeout = action.timeout_seconds or BASH_TIMEOUT_SECONDS
+        result, draining = await _run(self._program, action.command, timeout)
+        for drain in draining:
+            self._draining.add(drain)
+            drain.add_done_callback(self._draining.discard)
+        output = f"error: the command timed out after {timeout:g}s" if result.timed_out else result.stdout + result.stderr
+        return result, {"output": output, "exit_code": result.exit_code}, result.timed_out or result.exit_code != 0
+
+    async def _tool(self, turn: _Turn, action: ProxyToolAction) -> tuple[ProxyToolResult, dict[str, Any], bool]:
+        timeout = action.timeout_seconds or TOOL_TIMEOUT_SECONDS
+        try:
+            called = await asyncio.wait_for(self._called(turn, action), timeout)
+            result = ProxyToolResult(content=called.content, is_error=called.isError)
+        except asyncio.TimeoutError:
+            result = _tool_error(f"the tool call timed out after {timeout:g}s")
+        except (ToolSessionError, httpx.HTTPError) as e:
+            result = _tool_error(f"{type(e).__name__}: {e}")
+        text = "\n".join(block["text"] for block in result.content if block.get("type") == "text")
+        return result, ({"error": text} if result.is_error else {"output": text}), result.is_error
 
     async def _state(self, action_id: str, task: asyncio.Task[ProxyBashResult | ProxyToolResult]) -> ProxyActionState:
         await asyncio.wait((task,), timeout=self._long_poll_seconds)
@@ -534,15 +536,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _run(program: str, command: str, timeout: float, draining: set[asyncio.Task[None]]) -> ProxyBashResult:
+async def _run(program: str, command: str, timeout: float) -> tuple[ProxyBashResult, list[asyncio.Task[None]]]:
     """Run ``command`` in a process group of its own. It's done when its shell exits: what it started in the background
-    keeps running, and output that arrives after ``OUTPUT_GRACE_SECONDS`` is read and dropped (in ``draining``), so a
-    server it started never blocks on a full pipe. A command not done within ``timeout``, or whose call is cancelled,
-    is stopped with whatever it started."""
-    process = await asyncio.create_subprocess_exec(
-        program, "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True,
-    )
+    keeps running, and output that arrives after ``OUTPUT_GRACE_SECONDS`` is read and dropped by the readers returned
+    with the result, so a server it started never blocks on a full pipe. A command not done within ``timeout``, or
+    whose call is cancelled, is stopped with whatever it started."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            program, "-c", command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True,
+        )
+    except OSError as e:
+        # As a shell reports a command it can't execute: an argument list too long, say.
+        return ProxyBashResult(exit_code=126, stdout="", stderr=f"error: the command couldn't start: {e}\n",
+                               timed_out=False), []
     stdout, stderr = _Output(), _Output()
     readers = [asyncio.create_task(_read(process.stdout, stdout)), asyncio.create_task(_read(process.stderr, stderr))]
     try:
@@ -554,16 +561,11 @@ async def _run(program: str, command: str, timeout: float, draining: set[asyncio
         for reader in readers:
             reader.cancel()
         if isinstance(e, asyncio.TimeoutError):
-            return ProxyBashResult(exit_code=None, stdout="", stderr="", timed_out=True)
+            return ProxyBashResult(exit_code=None, stdout="", stderr="", timed_out=True), []
         raise
     await asyncio.wait(readers, timeout=OUTPUT_GRACE_SECONDS)
-    result = ProxyBashResult(exit_code=process.returncode, stdout=stdout.taken(), stderr=stderr.taken(),
-                             timed_out=False)
-    for reader in readers:
-        if not reader.done():
-            draining.add(reader)
-            reader.add_done_callback(draining.discard)
-    return result
+    result = ProxyBashResult(exit_code=process.returncode, stdout=stdout.take(), stderr=stderr.take(), timed_out=False)
+    return result, [reader for reader in readers if not reader.done()]
 
 
 async def _exited(process: asyncio.subprocess.Process) -> None:
@@ -582,7 +584,7 @@ class _Output:
         if self._data is not None:
             self._data.extend(chunk)
 
-    def taken(self) -> str:
+    def take(self) -> str:
         data, self._data = self._data or bytearray(), None
         return data.decode(errors="replace")
 
