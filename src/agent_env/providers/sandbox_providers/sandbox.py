@@ -675,11 +675,12 @@ def into_container(container: str | None) -> dict[str, str]:
 
 
 async def stage_files_into_container(
-    sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str, container: str | None = None
+    sandbox: Sandbox, file_artifacts: dict[str, Any], destination: str, container: str | None = None,
+    on_host: bool = False,
 ) -> dict[str, str]:
     """Write each object-store file into the sandbox's container under ``destination``; returns ``{name: path}``.
-    A VM-backed sandbox stages through its host into ``container``, by default its ``container_name``; a container
-    sandbox is written directly."""
+    A VM-backed sandbox stages through its host into ``container``, by default its ``container_name``, or, ``on_host``,
+    onto the host itself, for an agent install_agent put there; a container sandbox is written directly."""
     loaded: dict[str, str] = {}
     dirs_to_make: set[str] = {destination}
     for filename in file_artifacts:
@@ -689,7 +690,9 @@ async def stage_files_into_container(
         loaded[filename] = dest_path
 
     for d in sorted(dirs_to_make):
-        if isinstance(sandbox, VmSandbox):
+        if on_host:
+            await sandbox.exec_script(f"mkdir -p {shlex.quote(d)}")
+        elif isinstance(sandbox, VmSandbox):
             await sandbox.exec_script(
                 f"docker exec -u 0 {shlex.quote(container or sandbox.container_name)} mkdir -p {shlex.quote(d)}")
         else:
@@ -701,7 +704,11 @@ async def stage_files_into_container(
     async def _stage(filename: str, file_artifact: Any) -> None:
         async with sem:
             logger.info(f"  {file_artifact.object_url} -> {loaded[filename]}")
-            await sandbox.write_file_from_object(file_artifact.object_url, loaded[filename], **into_container(container))
+            if on_host:
+                await sandbox.load_object_file(file_artifact.object_url, loaded[filename])
+            else:
+                await sandbox.write_file_from_object(
+                    file_artifact.object_url, loaded[filename], **into_container(container))
 
     await asyncio.gather(*(_stage(fn, fa) for fn, fa in file_artifacts.items()))
     return loaded
