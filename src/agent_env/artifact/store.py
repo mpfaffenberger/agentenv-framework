@@ -24,6 +24,7 @@ from agent_env.store.document_store import (
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
+    expected_version,
 )
 from agent_env.store.ids import key_segment
 from agent_env.store.query import QueryBuilder, to_document_query
@@ -195,6 +196,9 @@ class ArtifactStore:
         if artifact.version > 0:
             versioned.insert_next(doc, artifact.version)
             return artifact.model_copy()
+        if (expected := expected_version(artifact.id)) is not None:
+            versioned.insert_next(doc, expected)
+            return artifact.model_copy(update={"version": expected})
         version = versioned.next_version(artifact.id)
         last_exc: Optional[DuplicateKeyError] = None
         for attempt in range(_MAX_VERSION_RETRIES):
