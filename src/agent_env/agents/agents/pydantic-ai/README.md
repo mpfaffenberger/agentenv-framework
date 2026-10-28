@@ -41,9 +41,10 @@ snapshots carry it.
 
 The snapshot changelog (`enable_changelog`/`apply_changelog`) is not implemented, nor is `attribution-probe/v1`.
 
-`PYDANTIC_AI_A2A_MODEL` sets the model when agent-config sets none, as for a peer that other agents message directly,
-and `PYDANTIC_AI_A2A_WORKSPACE` the workspace (default `/workspace`, and the task container's working directory when
-it's installed there). `a2a_server.py` reads these and the `LITELLM_*` variables once, at startup: a
+`PYDANTIC_AI_A2A_MODEL` sets the model when agent-config sets none (by default `anthropic/claude-sonnet-4-6`), as for a
+peer that other agents message directly, and `PYDANTIC_AI_A2A_WORKSPACE` the workspace (default `/workspace`, and the
+task container's working directory when it's installed there). `a2a_server.py` reads these and the `LITELLM_*`
+variables once, at startup: a
 `LITELLM_EXTRA_HEADERS` that is not a JSON object stops the agent there, while a missing `LITELLM_BASE_URL` fails each
 task as `pydantic_ai.no_endpoint`.
 

@@ -339,6 +339,11 @@ def test_the_default_model_is_the_fallback(tmp_path: Path, runtime: FakeRuntime)
     assert runtime.turns[0].config.model == "fallback-model"
 
 
+def test_the_environment_names_the_fallback_model_else_the_default() -> None:
+    assert pydantic_ai_agent.model_from_environ({}) == "anthropic/claude-sonnet-4-6"
+    assert pydantic_ai_agent.model_from_environ({"PYDANTIC_AI_A2A_MODEL": "vllm:qwen3.8-27b"}) == "vllm:qwen3.8-27b"
+
+
 def test_missing_endpoint_is_an_infra_failure(tmp_path: Path, runtime: FakeRuntime) -> None:
     agent = PydanticAIAgent(runtime, endpoint=None, default_model="m", home=tmp_path / "home", workspace=tmp_path / "ws")
     with TestClient(agent.create_app()) as client:

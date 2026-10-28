@@ -59,6 +59,8 @@ PYDANTIC_AI_VERSION: Final[str] = "2.61.0"
 TRAJECTORY_FORMAT: Final[str] = "pydantic-ai-messages/v1"
 # The model when agent-config sets none, as for a peer that other agents message directly.
 DEFAULT_MODEL_ENV: Final[str] = "PYDANTIC_AI_A2A_MODEL"
+# The model when DEFAULT_MODEL_ENV is unset too, as the other bundled agents have one.
+DEFAULT_MODEL: Final[str] = "anthropic/claude-sonnet-4-6"
 A2A_PORT: Final[int] = 8000
 INSTALL_DIR: Final[str] = "/opt/pydantic-ai-a2a"
 ENV_FILE: Final[str] = "agent.env"
@@ -206,6 +208,11 @@ async def _turns_stop_with_the_server(app: Starlette) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.agentenv_a2a.agent.runtime.stop()
+
+
+def model_from_environ(environ: Mapping[str, str]) -> str:
+    """The model a task runs when agent-config sets none: DEFAULT_MODEL_ENV's, else DEFAULT_MODEL."""
+    return environ.get(DEFAULT_MODEL_ENV) or DEFAULT_MODEL
 
 
 def conversation_id(context_id: str) -> str:

@@ -8,13 +8,13 @@ from typing import Final
 from a2a.types import AgentCard
 from starlette.applications import Starlette
 
-from pydantic_ai_agent import DEFAULT_MODEL_ENV, Endpoint, PydanticAIAgent
+from pydantic_ai_agent import Endpoint, PydanticAIAgent, model_from_environ
 from pydantic_ai_runtime import PydanticAIRuntime
 
 agent: Final[PydanticAIAgent] = PydanticAIAgent(
     PydanticAIRuntime(),
     endpoint=Endpoint.from_environ(os.environ),
-    default_model=os.environ.get(DEFAULT_MODEL_ENV),
+    default_model=model_from_environ(os.environ),
     workspace=Path(os.environ.get("PYDANTIC_AI_A2A_WORKSPACE", "/workspace")),
 )
 app: Final[Starlette] = agent.create_app()
