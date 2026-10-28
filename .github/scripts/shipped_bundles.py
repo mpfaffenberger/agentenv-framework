@@ -1,12 +1,16 @@
 """The bundles agentenv-framework ships, from its ``agent_env.bundles`` entry points: ``<name> = "<package>"`` ships the
 folder ``src/<package as a path>/<name>/``.
 
-``pin`` pins agentenv-framework-protocol, keeping its extras, in each shipped env's and artifact's requirements.txt to
-the version ``packages/agentenv-protocol`` is at, which a release ships them with. An agent's keeps its floor: a pin is
-one of its image's sources, so pinning it would build and publish a new image every release, and with the floor its
-image is built only when its folder changes. Every release job that reads those folders runs it first, so an image's
-tag, its build and the wheel all see the same sources. It uses only the standard library, so the jobs that push images
-can run it.
+``pin-pyproject`` pins agentenv-framework-protocol, keeping its extras, in the framework's own requirement on it in
+``pyproject.toml``, to the version ``packages/agentenv-protocol`` is at, which the release's wheel is built with. Its
+extras are what core imports from the protocol, so a pin that dropped them would ship a wheel that can't import.
+
+``pin`` pins the protocol the same way in each shipped env's and artifact's requirements.txt, which a release ships them
+with. An agent's, and an env's whose image
+a release publishes (``PUBLISHED_ENVS``), keep their floor: a pin is one of an image's sources, so pinning it would
+build and publish a new image every release, and with the floor the image is built only when its folder changes. Every
+release job that reads those folders runs it first, so an image's tag, its build and the wheel all see the same sources.
+It uses only the standard library, so the jobs that push images can run it.
 """
 
 from __future__ import annotations
@@ -21,8 +25,13 @@ REPO = Path(__file__).resolve().parents[2]
 BUNDLES = "agent_env.bundles"
 PROTOCOL = "agentenv-framework-protocol"
 _PINNED_KINDS = ("envs", "artifacts")
+# The shipped env folders whose images a release publishes, as agent_env.env.published_images.EXAMPLE_IMAGES lists them.
+PUBLISHED_ENVS = ("src/agent_env/examples/mail-mcp/envs/mail",)
 # A requirement on the protocol, with its extras, and not on a package whose name starts with the protocol's.
 _PROTOCOL_REQUIREMENT = re.compile(rf"^{PROTOCOL}(\[[^\]]*\])?(?![\w.-])")
+# The quoted requirement in pyproject.toml, with its extras: the directory name in the sdist include list and the uv
+# workspace members, and the bare name keying [tool.uv.sources], aren't requirements.
+_QUOTED_REQUIREMENT = re.compile(rf'"{PROTOCOL}(\[[^\]"]*\])?(?![\w./-])[^"]*"')
 
 
 def bundle_roots(repo: Path = REPO) -> dict[str, Path]:
@@ -33,9 +42,11 @@ def bundle_roots(repo: Path = REPO) -> dict[str, Path]:
 
 
 def requirements_files(repo: Path = REPO) -> list[Path]:
-    """Every ``<bundle>/<envs|artifacts>/<name>/requirements.txt`` a shipped bundle holds: those a release pins."""
+    """Every ``<bundle>/<envs|artifacts>/<name>/requirements.txt`` a shipped bundle holds but a ``PUBLISHED_ENVS``
+    folder's: those a release pins."""
+    published = {repo / folder for folder in PUBLISHED_ENVS}
     return sorted(path for root in bundle_roots(repo).values() for kind in _PINNED_KINDS
-                  for path in root.glob(f"{kind}/*/requirements.txt"))
+                  for path in root.glob(f"{kind}/*/requirements.txt") if path.parent not in published)
 
 
 def protocol_version(repo: Path = REPO) -> str:
@@ -56,6 +67,19 @@ def pin(repo: Path = REPO) -> list[Path]:
     return pinned
 
 
+def pin_pyproject(repo: Path = REPO) -> str:
+    """Pin the framework's one quoted requirement on the protocol in ``pyproject.toml``, keeping its extras, and return
+    the pinned requirement."""
+    path = repo / "pyproject.toml"
+    text = path.read_text()
+    found = _QUOTED_REQUIREMENT.findall(text)
+    if len(found) != 1:
+        raise ValueError(f"{path} holds {len(found)} quoted {PROTOCOL} requirements, not the one a release pins")
+    pinned = f"{PROTOCOL}{found[0]}=={protocol_version(repo)}"
+    path.write_text(_QUOTED_REQUIREMENT.sub(f'"{pinned}"', text))
+    return pinned
+
+
 def _pinned(line: str, version: str) -> str:
     if not (match := _PROTOCOL_REQUIREMENT.match(line)):
         return line
@@ -65,8 +89,12 @@ def _pinned(line: str, version: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_subparsers(dest="command", required=True).add_parser("pin")
-    parser.parse_args()
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("pin")
+    commands.add_parser("pin-pyproject")
+    if parser.parse_args().command == "pin-pyproject":
+        print(f"pinned {pin_pyproject()} in pyproject.toml")
+        return 0
     version = protocol_version()
     for path in pin():
         print(f"pinned {PROTOCOL}=={version} in {path.relative_to(REPO).as_posix()}")
