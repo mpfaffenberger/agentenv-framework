@@ -26,7 +26,7 @@ A context maps to one conversation, whose id is derived from the context id, its
 `~/.pydantic-ai-a2a/conversations/<id>/messages.json` once a turn succeeds, so follow-up tasks in the context continue
 it, across restarts too. Images are sent to the model as images; every file part is also saved in the conversation's
 directory under `inputs/<task id>/` and its path added to the prompt, for the agent's tools, and the conversation's
-snapshots carry it.
+snapshots carry it. A file part larger than 256 MiB, inline or downloaded, fails the task as `pydantic_ai.attachment`.
 
 | Extension | Implementation |
 |---|---|
@@ -50,7 +50,8 @@ task as `pydantic_ai.no_endpoint`.
 
 Snapshot `load` answers 409 while a task is running, and 400 for an archive that holds no conversation. A snapshot
 `save` waits for its context's running task to end; one that saves the workspace also waits for the tasks running in
-other contexts, which work in the same workspace.
+other contexts, which work in the same workspace. When the workspace holds the agent's own `~/.pydantic-ai-a2a`, as an
+install in a home directory's does, the workspace snapshot leaves it out and `load` keeps it as it is.
 
 Usage is the run's: input, output and cached tokens, model requests and tool calls; no cost. A failed run's error code
 says whose failure it was: `pydantic_ai.model_http_<status>` and `pydantic_ai.model_api` for the model endpoint and

@@ -238,7 +238,10 @@ async def _materialize(part: FilePart, index: int, directory: Path) -> Path:
     name = Path(part.name).name if part.name else ""
     destination = directory / f"{index}-{name or 'file'}"
     if part.bytes is not None:
-        destination.write_bytes(base64.b64decode(part.bytes))
+        # Unpadded, base64's length gives the size it decodes to, so an oversized file is refused before it's decoded.
+        if len(part.bytes.rstrip("=")) * 3 // 4 > MAX_ATTACHMENT_BYTES:
+            raise ValueError(f"{name or 'file'} is larger than {MAX_ATTACHMENT_BYTES} bytes")
+        await to_completion(lambda: destination.write_bytes(base64.b64decode(part.bytes)))
         return destination
     if urlsplit(part.uri).scheme not in {"http", "https"}:
         raise ValueError(f"unsupported file URI scheme for {name or 'file'}")
@@ -257,11 +260,13 @@ async def _materialize(part: FilePart, index: int, directory: Path) -> Path:
     return destination
 
 
-def _pack(directory: Path, archive: Path, *, record_source: bool = False) -> None:
-    """``directory``'s contents as a gzipped tar and, for a conversation, the directory it was saved from."""
+def _pack(directory: Path, archive: Path, *, record_source: bool = False, leave_out: str | None = None) -> None:
+    """``directory``'s contents, but for its entry named ``leave_out``, as a gzipped tar and, for a conversation, the
+    directory it was saved from."""
     with tarfile.open(archive, "w:gz") as tar:
         for child in sorted(directory.iterdir()):
-            tar.add(child, arcname=child.name)
+            if child.name != leave_out:
+                tar.add(child, arcname=child.name)
         if record_source:
             source = json.dumps({"directory": str(directory)}).encode()
             info = tarfile.TarInfo(SOURCE)
@@ -283,18 +288,20 @@ def _extract(archive: Path, directory: Path) -> Path:
     return staging
 
 
-def _replace_contents(directory: Path, staging: Path) -> None:
-    """Replace ``directory``'s contents with those of ``staging``, a directory inside it."""
+def _replace_contents(directory: Path, staging: Path, *, keep: str | None = None) -> None:
+    """Replace ``directory``'s contents with those of ``staging``, a directory inside it, but for its entry named
+    ``keep``, which stays as it is."""
     for child in directory.iterdir():
-        if child == staging:
+        if child == staging or child.name == keep:
             continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
         else:
             child.unlink()
     for child in staging.iterdir():
-        child.rename(directory / child.name)
-    staging.rmdir()
+        if child.name != keep:
+            child.rename(directory / child.name)
+    shutil.rmtree(staging)
 
 
 def _stage_conversation(
@@ -500,7 +507,8 @@ class PydanticAIAgent(AgentEnvAgent):
                     # for the lock this holds.
                     await self._idle.wait()
                     self.workspace.mkdir(parents=True, exist_ok=True)
-                    await to_completion(_pack, self.workspace, workspace_archive)
+                    await to_completion(_pack, self.workspace, workspace_archive,
+                                        leave_out=_entry_holding(self.workspace, self.home))
             objects = {"trajectory": (await upload(request.objects.trajectory, conversation_archive)).model_dump(mode="json")}
             if request.objects.workspace is not None:
                 objects["workspace"] = (await upload(request.objects.workspace, workspace_archive)).model_dump(mode="json")
@@ -536,7 +544,7 @@ class PydanticAIAgent(AgentEnvAgent):
             if workspace_archive is not None:
                 self.workspace.mkdir(parents=True, exist_ok=True)
                 staged.append(_extract(workspace_archive, self.workspace))
-                _replace_contents(self.workspace, staged[-1])
+                _replace_contents(self.workspace, staged[-1], keep=_entry_holding(self.workspace, self.home))
             shutil.rmtree(target, ignore_errors=True)
             conversation.rename(target)
         finally:
@@ -562,3 +570,12 @@ class PydanticAIAgent(AgentEnvAgent):
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         return {"name": request.name}
+
+
+def _entry_holding(directory: Path, path: Path) -> str | None:
+    """The name of ``directory``'s entry that ``path`` is in, as the agent's home is in a workspace an install in a
+    home directory works in; None when ``path`` is outside ``directory``."""
+    try:
+        return path.resolve().relative_to(directory.resolve()).parts[0]
+    except (ValueError, IndexError):
+        return None

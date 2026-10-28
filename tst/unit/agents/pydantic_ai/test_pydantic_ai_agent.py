@@ -396,6 +396,19 @@ def test_an_oversized_attachment_is_refused(
     assert runtime.turns == []
 
 
+def test_an_oversized_inline_attachment_is_refused(
+    client: TestClient, runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pydantic_ai_agent, "MAX_ATTACHMENT_BYTES", 8)
+    big = base64.b64encode(b"x" * 9).decode()
+
+    task = _send(client, [{"kind": "text", "text": "read it"},
+                          {"kind": "file", "file": {"name": "big.txt", "mimeType": "text/plain", "bytes": big}}])
+
+    assert _reply(task)[1]["error_code"] == "pydantic_ai.attachment"
+    assert runtime.turns == []
+
+
 def _write() -> dict[str, Any]:
     return {"media_type": "application/octet-stream", "max_bytes": 1 << 20, "write": GRANT}
 
@@ -478,6 +491,34 @@ def test_a_snapshot_loaded_on_an_agent_with_another_home_names_its_attached_file
     assert loaded.status_code == 200
     assert _attached(message) == target / attached.relative_to(conversation(tmp_path / "home", "source"))
     assert _attached(message).read_bytes() == b"TOKEN-8"
+
+
+def test_a_workspace_holding_the_agents_home_is_restored_around_it(
+    runtime: FakeRuntime, tmp_path: Path, objects: dict[str, bytes]
+) -> None:
+    """An install in a home directory works there, so the agent's home is inside its workspace."""
+    workspace = tmp_path / "home-dir"
+    agent = PydanticAIAgent(runtime, endpoint=ENDPOINT, default_model="m", home=workspace / ".pydantic-ai-a2a",
+                            workspace=workspace)
+    with TestClient(agent.create_app(), client=("127.0.0.1", 50000)) as client:
+        _send(client, [{"kind": "text", "text": "remember TOKEN-1"}], context_id="source")
+        _send(client, [{"kind": "text", "text": "another conversation"}], context_id="other")
+        (workspace / "notes.txt").write_text("remember TOKEN-1")
+        saved = client.post("/ext/snapshot", json={"context_id": "source", "objects": {
+            "trajectory": _write(), "workspace": _write()}})
+        (workspace / "notes.txt").unlink()
+        (workspace / "after.txt").write_text("written after the snapshot")
+
+        loaded = client.put("/ext/snapshot", json={"objects": {
+            "trajectory": _read("trajectory"), "workspace": _read("workspace")}, "target_context_id": "target"})
+
+    with tarfile.open(fileobj=io.BytesIO(objects["workspace"])) as tar:
+        assert tar.getnames() == ["notes.txt"]
+    assert saved.status_code == 200 and loaded.status_code == 200, loaded.text
+    assert (workspace / "notes.txt").read_text() == "remember TOKEN-1"
+    assert not (workspace / "after.txt").exists()
+    assert history(conversation(workspace / ".pydantic-ai-a2a", "target")) == ["remember TOKEN-1"]
+    assert history(conversation(workspace / ".pydantic-ai-a2a", "other")) == ["another conversation"]
 
 
 @pytest.mark.parametrize("member, content", [
